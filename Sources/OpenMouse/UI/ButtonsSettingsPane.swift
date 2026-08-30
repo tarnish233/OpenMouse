@@ -217,21 +217,18 @@ private struct ActionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            // A flat picker with 25 actions is an unusable ribbon of text. Grouping them
-            // into submenus keeps the whole list two clicks away and one screen tall.
+            // A flat picker with two dozen actions is an unusable ribbon of text. Grouping
+            // them into submenus keeps the whole list two clicks away and one screen tall,
+            // with the default sitting at the top level where it is one click.
             Menu {
+                ForEach(ActionKind.ungrouped) { item in
+                    row(for: item)
+                }
+                Divider()
                 ForEach(ActionKind.groups, id: \.0) { group in
                     Menu(group.0) {
                         ForEach(group.1) { item in
-                            Button {
-                                action = item.makeAction(preserving: action)
-                            } label: {
-                                if ActionKind(action) == item {
-                                    Label(item.title, systemImage: "checkmark")
-                                } else {
-                                    Text(item.title)
-                                }
-                            }
+                            row(for: item)
                         }
                     }
                 }
@@ -261,6 +258,19 @@ private struct ActionRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func row(for item: ActionKind) -> some View {
+        Button {
+            action = item.makeAction(preserving: action)
+        } label: {
+            if ActionKind(action) == item {
+                Label(item.title, systemImage: "checkmark")
+            } else {
+                Text(item.title)
+            }
+        }
     }
 
     private var comboBinding: Binding<KeyCombo?> {

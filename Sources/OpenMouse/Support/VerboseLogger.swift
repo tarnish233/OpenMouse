@@ -51,6 +51,15 @@ final class VerboseLogger {
         if now.syntheticEventsPosted != previous.syntheticEventsPosted {
             parts.append("synthesized=\(now.syntheticEventsPosted)")
         }
+        if now.wheelEventsUndeliverable != previous.wheelEventsUndeliverable {
+            parts.append("UNDELIVERABLE=\(now.wheelEventsUndeliverable)")
+        }
+        if now.lastTargetPID != previous.lastTargetPID {
+            parts.append("targetPID=\(now.lastTargetPID)")
+        }
+        if now.lastRawDeltaSource != previous.lastRawDeltaSource {
+            parts.append("rawFrom=\(now.lastRawDeltaSource.rawValue)")
+        }
         if now.buttonActionsFired != previous.buttonActionsFired {
             parts.append("buttonActions=\(now.buttonActionsFired)")
         }

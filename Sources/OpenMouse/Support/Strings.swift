@@ -23,7 +23,7 @@ enum Strings {
     static let settingsTitle = "Open Mouse 设置"
     static let tabScroll = "滚动"
     static let tabButtons = "按键"
-    static let tabApps = "应用例外"
+    static let tabApps = "应用"
     static let tabGeneral = "通用"
 
     // Permission banner
@@ -117,8 +117,6 @@ enum Strings {
 
     // Updates
     static let updateSection = "更新"
-    static let updateRepository = "更新源"
-    static let updateRepositoryHelp = "GitHub 仓库，形如 owner/repo。留空则不检查更新；fork 之后可以改成自己的仓库。"
     static let updateAuto = "自动检查更新"
     static let updateAutoHelp = "每天最多检查一次，只读取 GitHub 的最新发布信息，不会自动安装。"
     static let updateCheckNow = "立即检查"

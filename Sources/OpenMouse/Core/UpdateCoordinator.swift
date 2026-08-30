@@ -28,7 +28,7 @@ final class UpdateCoordinator {
 
     func startAutomaticCheckIfDue() {
         let settings = store.preferences.update
-        guard settings.checkAutomatically, !settings.repository.isEmpty else { return }
+        guard settings.checkAutomatically else { return }
 
         // Show what the last check found before deciding whether to make a new request, so
         // the notice is present immediately on launch rather than only after a round trip.
@@ -50,9 +50,8 @@ final class UpdateCoordinator {
         isChecking = true
         defer { isChecking = false }
 
-        let repository = store.preferences.update.repository
         let result = await UpdateChecker.check(
-            repository: repository,
+            repository: UpdateSettings.repository,
             currentVersion: AppVersion.short
         )
         outcome = result

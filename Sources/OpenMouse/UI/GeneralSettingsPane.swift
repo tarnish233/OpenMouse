@@ -107,7 +107,7 @@ struct GeneralSettingsPane: View {
             Button("恢复默认", role: .destructive) { store.resetAll() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("滚动参数、按键映射与应用例外都会被清空。")
+            Text("滚动参数、按键映射与应用规则都会被清空。")
         }
         .onAppear { launchAtLogin = LoginItem.isEnabled }
     }
@@ -160,6 +160,30 @@ private struct LiveCounters: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                // Only shown once a notch has been handled: before that these read as zeros
+                // that look like a fault rather than an idle pipeline.
+                if stats.wheelEventsSmoothed > 0 {
+                    LabeledContent("投递目标") {
+                        HStack(spacing: 8) {
+                            Text(targetName(pid: stats.lastTargetPID))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("步长取自 \(stats.lastRawDeltaSource.rawValue)")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                // Loud on purpose. A non-zero value is the signature of the tap sitting at
+                // the wrong layer, which is what a dead scroll wheel looks like from here.
+                if stats.wheelEventsUndeliverable > 0 {
+                    LabeledContent("无法投递（已放行）") {
+                        Text("\(stats.wheelEventsUndeliverable)")
+                            .monospacedDigit()
+                            .foregroundStyle(.orange)
+                    }
+                }
                 HStack {
                     Spacer()
                     Button("清零计数") { engine.resetStats() }
@@ -167,6 +191,14 @@ private struct LiveCounters: View {
                 }
             }
         }
+    }
+
+    /// A pid alone tells the user nothing; the app name is the part that confirms frames are
+    /// going where the pointer is.
+    private func targetName(pid: Int) -> String {
+        guard pid > 0 else { return "未解析" }
+        let name = NSRunningApplication(processIdentifier: pid_t(pid))?.localizedName
+        return name.map { "\($0) (\(pid))" } ?? "pid \(pid)"
     }
 }
 
@@ -179,23 +211,6 @@ private struct UpdateSection: View {
 
     var body: some View {
         Section {
-            LabeledContent {
-                TextField("owner/repo", text: $store.preferences.update.repository)
-                    .labelsHidden()
-                    .multilineTextAlignment(.leading)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 240)
-                    .autocorrectionDisabled()
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(Strings.updateRepository)
-                    Text(Strings.updateRepositoryHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
             Toggle(isOn: $store.preferences.update.checkAutomatically) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(Strings.updateAuto)
@@ -206,14 +221,13 @@ private struct UpdateSection: View {
                 }
             }
             .toggleStyle(.switch)
-            .disabled(store.preferences.update.repository.isEmpty)
 
             HStack(spacing: 10) {
                 Button(updates.isChecking ? Strings.updateChecking : Strings.updateCheckNow) {
                     Task { await updates.check(userInitiated: true) }
                 }
                 .controlSize(.small)
-                .disabled(updates.isChecking || store.preferences.update.repository.isEmpty)
+                .disabled(updates.isChecking)
 
                 if updates.isChecking {
                     ProgressView().controlSize(.small)

@@ -14,7 +14,6 @@ final class EventRouter {
     let stats = Locked(EngineStats())
 
     private let animator: ScrollAnimator
-    private let poster = ScrollEventPoster()
     private let actions = ActionRunner()
 
     private let config: Locked<ResolvedConfig>
@@ -25,11 +24,16 @@ final class EventRouter {
 
     /// Timestamp of the last wheel notch, for the flywheel acceleration curve.
     private var lastNotchTime: CFTimeInterval = 0
-    /// Which button (if any) is currently held for drag-to-scroll.
-    private var dragScrollButton: Int?
     /// Active gesture-navigation holds, keyed by button number. A dictionary rather than a
     /// single slot because two buttons can be bound to gestures and held at once.
     private var gestureSessions: [Int: MouseGestureRecognizer] = [:]
+    /// Motion events seen in the current hold, so tracing can log the first few and stop.
+    private var motionEventCount = 0
+
+    /// Called when a gesture hold begins or ends, so the engine can bring up the motion tap
+    /// only while one is in progress. Subscribing to every pointer movement permanently would
+    /// burn CPU for a feature that is idle almost all of the time.
+    var onGestureActivityChanged: ((Bool) -> Void)?
 
     init(config: Locked<ResolvedConfig>) {
         self.config = config
@@ -48,17 +52,19 @@ final class EventRouter {
         bindings.value = list.filter(\.isActive)
     }
 
-    /// True when any binding needs mouse-drag events, so the tap can widen its mask.
-    /// Both drag-scrolling and gesture navigation are driven by pointer movement.
-    static func needsDragEvents(_ list: [ButtonBinding]) -> Bool {
-        list.contains { $0.isActive && ($0.action == .dragScroll || $0.action == .gestureNavigation) }
-    }
-
     /// Frame source in use for the current or most recent glide.
     var frameSource: DisplayLinkTicker.Source { animator.frameSource }
 
     func cancelInFlightScrolling() {
         animator.cancel()
+    }
+
+    /// Drop any in-progress gesture. Called when the system disables a tap mid-hold, which
+    /// would otherwise leave a session armed with no button-up coming to close it.
+    func cancelGestures() {
+        guard !gestureSessions.isEmpty else { return }
+        gestureSessions.removeAll()
+        onGestureActivityChanged?(false)
     }
 
     // MARK: - Entry point
@@ -75,8 +81,8 @@ final class EventRouter {
             return handleScroll(event)
         case .otherMouseDown, .otherMouseUp:
             return handleButton(type: type, event: event)
-        case .otherMouseDragged:
-            return handleDrag(event)
+        case .mouseMoved, .otherMouseDragged, .leftMouseDragged, .rightMouseDragged:
+            return handleMotion(event)
         default:
             return Unmanaged.passUnretained(event)
         }
@@ -115,13 +121,18 @@ final class EventRouter {
             let dy = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
             let dx = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
             guard dy != 0 || dx != 0 else { return Unmanaged.passUnretained(event) }
+            // Same rule as the wheel path: never swallow what we cannot re-deliver.
+            guard let target = ScrollEventPoster.target(from: event) else {
+                stats.withValue { $0.wheelEventsUndeliverable += 1 }
+                return Unmanaged.passUnretained(event)
+            }
             let signY: Double = settings.reverseVertical ? -1 : 1
             let signX: Double = settings.reverseHorizontal ? -1 : 1
             animator.enqueue(
                 vertical: dy * signY,
                 horizontal: dx * signX,
                 settings: settings,
-                target: ScrollEventPoster.target(from: event)
+                target: target
             )
             return nil
         }
@@ -151,6 +162,19 @@ final class EventRouter {
         let fixed = event.getDoubleValueField(fixedField)
         if fixed != 0 { return fixed }
         return event.getDoubleValueField(lineField)
+    }
+
+    /// Which of the three delta fields actually supplied the magnitude.
+    ///
+    /// Worth reporting rather than assuming: if this says `line`, every notch scales from the
+    /// same ±1 and fast flicks travel no further than slow ones — the pipeline is smooth but
+    /// feels inert, and no amount of tuning the easing curve fixes it.
+    private static func rawDeltaSource(of event: CGEvent) -> EngineStats.RawDeltaSource {
+        if event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1) != 0
+            || event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2) != 0 { return .point }
+        if event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1) != 0
+            || event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2) != 0 { return .fixed }
+        return .line
     }
 
     private func handleWheel(_ event: CGEvent, settings: ScrollSettings) -> Unmanaged<CGEvent>? {
@@ -189,14 +213,39 @@ final class EventRouter {
         let gain = accelerationGain(settings: settings)
         let distanceY = settings.travel(forRawDelta: rawY) * gain * signY
         let distanceX = settings.travel(forRawDelta: rawX) * gain * signX
-        stats.withValue { $0.wheelEventsSmoothed += 1 }
+
         // Keep a copy of this event so every frame of the glide is delivered to the process
         // the notch was aimed at, instead of wherever the pointer happens to be later.
+        //
+        // If there is no routable target, pass the notch through untouched. Swallowing it
+        // and then having nowhere to send the replacement is the one failure that presents
+        // as "my scroll wheel stopped working", so the degraded path must be unsmoothed
+        // scrolling, never no scrolling.
+        guard let target = ScrollEventPoster.target(from: event) else {
+            stats.withValue {
+                $0.wheelEventsUndeliverable += 1
+                $0.wheelEventsPassedThrough += 1
+            }
+            if settings.reverseVertical || settings.reverseHorizontal {
+                flipAxes(
+                    of: event,
+                    vertical: settings.reverseVertical,
+                    horizontal: settings.reverseHorizontal
+                )
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        stats.withValue {
+            $0.wheelEventsSmoothed += 1
+            $0.lastTargetPID = Int(target.pid)
+            $0.lastRawDeltaSource = Self.rawDeltaSource(of: event)
+        }
         animator.enqueue(
             vertical: distanceY,
             horizontal: distanceX,
             settings: settings,
-            target: ScrollEventPoster.target(from: event)
+            target: target
         )
         return nil
     }
@@ -269,23 +318,29 @@ final class EventRouter {
 
         let modifiers = event.flags.rawValue & Self.modifierMask
         guard let binding = bindings.value.resolve(button: button, modifiers: modifiers) else {
+            Trace.buttonUnbound(button: button)
             return Unmanaged.passUnretained(event)
         }
         let action = binding.action
-
-        if action == .dragScroll {
-            if type == .otherMouseDown {
-                dragScrollButton = button
-            } else if dragScrollButton == button {
-                dragScrollButton = nil
-            }
-            return nil
-        }
+        Trace.buttonSeen(button: button, isDown: type == .otherMouseDown, action: "\(action)")
 
         if action == .gestureNavigation {
             if type == .otherMouseDown {
-                gestureSessions[button] = MouseGestureRecognizer()
+                let wasIdle = gestureSessions.isEmpty
+                var recognizer = MouseGestureRecognizer()
+                recognizer.begin(at: event.location)
+                gestureSessions[button] = recognizer
+                motionEventCount = 0
+                Trace.gestureBegan(button: button)
+                if wasIdle { onGestureActivityChanged?(true) }
             } else if let session = gestureSessions.removeValue(forKey: button) {
+                Trace.gestureEnded(
+                    button: button,
+                    asClick: session.shouldTreatAsClick,
+                    travelled: session.maximumDistanceFromOrigin,
+                    motionEvents: motionEventCount
+                )
+                if gestureSessions.isEmpty { onGestureActivityChanged?(false) }
                 // A hold that never moved is a click, and a click on the gesture button
                 // opens Mission Control.
                 if session.shouldTreatAsClick {
@@ -305,36 +360,42 @@ final class EventRouter {
         return nil
     }
 
-    private func handleDrag(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
+    /// Feed pointer movement to any gesture hold in progress.
+    ///
+    /// The event type this arrives as is not what you would expect. Because the button-down
+    /// was swallowed, the system never enters a drag for that button, so the movement is
+    /// delivered as a plain `.mouseMoved` — subscribing only to `.otherMouseDragged` means
+    /// never being called at all, which is how this feature managed to look implemented and
+    /// do nothing. Both are accepted, and the movement is passed through untouched: the
+    /// pointer belongs to the user even mid-gesture.
+    private func handleMotion(_ event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard !gestureSessions.isEmpty else { return Unmanaged.passUnretained(event) }
 
-        if gestureSessions[button] != nil {
-            let dy = Double(event.getIntegerValueField(.mouseEventDeltaY))
-            let dx = Double(event.getIntegerValueField(.mouseEventDeltaX))
-            if let direction = gestureSessions[button]?.append(deltaX: dx, deltaY: dy) {
-                stats.withValue { $0.buttonActionsFired += 1 }
-                actions.runAsync(direction.action)
-            }
-            // Swallow the movement so the pointer stays put during the gesture.
-            return nil
-        }
-
-        guard let held = dragScrollButton, button == held
-        else { return Unmanaged.passUnretained(event) }
-
+        // Read the delta fields with the integer accessor they are declared as, then let the
+        // recognizer fall back to differencing `event.location` when they come through empty.
         let dy = Double(event.getIntegerValueField(.mouseEventDeltaY))
         let dx = Double(event.getIntegerValueField(.mouseEventDeltaX))
-        // 1:1 with the hand, no easing — drag scrolling should feel like grabbing paper.
-        if dy != 0 || dx != 0 {
-            poster.post(
-                vertical: dy,
-                horizontal: dx,
-                phase: .none,
-                target: ScrollEventPoster.target(from: event)
-            )
+        let location = event.location
+        Trace.motion(
+            index: motionEventCount,
+            type: event.type.rawValue,
+            dx: dx,
+            dy: dy,
+            location: location
+        )
+        motionEventCount += 1
+
+        // Snapshot the keys: mutating the dictionary while iterating its lazy view is not
+        // something to rely on.
+        for button in Array(gestureSessions.keys) {
+            guard let direction = gestureSessions[button]?
+                .append(location: location, fieldDeltaX: dx, fieldDeltaY: dy)
+            else { continue }
+            Trace.recognized(direction: direction.rawValue, action: "\(direction.action)")
+            stats.withValue { $0.buttonActionsFired += 1 }
+            actions.runAsync(direction.action)
         }
-        // Swallowing the drag keeps the pointer anchored while scrolling.
-        return nil
+        return Unmanaged.passUnretained(event)
     }
 }
 

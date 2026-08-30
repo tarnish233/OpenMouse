@@ -43,6 +43,9 @@ struct MouseGestureRecognizer {
     private(set) var displacement = CGPoint.zero
     private(set) var maximumDistanceFromOrigin: Double = 0
     private(set) var recognized: MouseGestureDirection?
+    /// Where the pointer was at the previous sample, so movement can be measured from the
+    /// event's own coordinates rather than trusting a delta field to be populated.
+    private var lastLocation: CGPoint?
 
     init(
         activationDistance: Double = defaultActivationDistance,
@@ -52,6 +55,39 @@ struct MouseGestureRecognizer {
         self.activationDistance = activationDistance
         self.clickTolerance = clickTolerance
         self.dominanceRatio = dominanceRatio
+    }
+
+    /// Anchor the gesture at the location of the press that started it.
+    mutating func begin(at location: CGPoint) {
+        lastLocation = location
+    }
+
+    /// Feed one movement sample, measured however the event can actually be measured.
+    ///
+    /// Two sources, because neither is reliable alone:
+    /// - The delta fields are the hardware's own report and keep counting when the pointer is
+    ///   clamped at a screen edge — a swipe right along the right edge moves no coordinates.
+    /// - They also come through as zero on some devices, which is what made this feature look
+    ///   broken: the recognizer accumulated nothing and every gesture ended as "never moved".
+    ///
+    /// So prefer the delta when it carries something, and otherwise difference the event's own
+    /// location, which is always populated.
+    mutating func append(
+        location: CGPoint,
+        fieldDeltaX: Double,
+        fieldDeltaY: Double
+    ) -> MouseGestureDirection? {
+        let previous = lastLocation
+        lastLocation = location
+
+        var dx = fieldDeltaX
+        var dy = fieldDeltaY
+        if dx == 0, dy == 0, let previous {
+            dx = location.x - previous.x
+            dy = location.y - previous.y
+        }
+        guard dx != 0 || dy != 0 else { return nil }
+        return append(deltaX: dx, deltaY: dy)
     }
 
     /// Feed one movement delta. Returns a direction exactly once per hold.

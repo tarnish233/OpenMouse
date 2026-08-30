@@ -39,9 +39,13 @@ struct ScrollEventPoster {
     }
 
     /// Snapshot the event a notch arrived on, so later frames can be delivered like it.
+    ///
+    /// Returns `nil` when the event carries no routable target. Callers must treat that as
+    /// "do not swallow this event": there is nowhere to deliver a replacement, and a
+    /// swallowed notch with no replacement is a dead scroll wheel.
     static func target(from event: CGEvent) -> Target? {
-        guard let copy = event.copy() else { return nil }
         let pid = pid_t(event.getIntegerValueField(.eventTargetUnixProcessID))
+        guard pid > 0, let copy = event.copy() else { return nil }
         return Target(event: copy, pid: pid)
     }
 
@@ -68,7 +72,10 @@ struct ScrollEventPoster {
         if let pid = target?.pid, pid > 0 {
             event.postToPid(pid)
         } else {
-            event.post(tap: .cghidEventTap)
+            // No routable target. The session tap re-routes by cursor location, which is the
+            // right generic behaviour; it is only wrong for inertia, and inertia without a
+            // target is not something we get to have.
+            event.post(tap: .cgSessionEventTap)
         }
     }
 

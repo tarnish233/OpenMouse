@@ -1,0 +1,113 @@
+# Open Mouse — 项目上下文
+
+macOS 菜单栏鼠标增强工具：滚轮平滑、独立反向、按键与手势映射。纯 `CGEventTap`，无内核扩展、无驱动。SwiftPM 构建（不用 Xcode 工程），AppKit 生命周期 + SwiftUI 设置界面。
+
+## 命令
+
+```bash
+make app     # 编译 + 组装 .app + 签名 → build/Open Mouse.app
+make run     # 上面这些，然后启动
+make test    # 跑内置自检（136 项，必须全过）
+make dist    # 打包 zip
+```
+
+改完代码**必须**跑 `make test`。这些断言就是为了防止下面每一条被重新弄坏。
+
+## 硬性约束
+
+违反任何一条都会造成**静默失效**——事件成功发出、系统不理、功能看起来就是「没反应」。全都是实际踩过的坑，不是理论风险。
+
+1. **tap 必须挂在 `.cgAnnotatedSessionEventTap`**，不能用 `.cghidEventTap`。`postToPid` 依赖 `kCGEventTargetUnixProcessID`，只有 annotated session 层会填这个字段；HID 层给的是「最前面的窗口」，不是实际路由目标。挂错层的后果是滚轮**整个失效**（悬停在后台窗口滚动时，合成帧全投给了前台窗口）。
+2. **投不出去就不要吞。** 取不到有效 pid 时直接放行原事件。宁可少一次平滑，不能把一格滚轮变成什么都没发生。
+3. **窗口管理快捷键必须带 `maskSecondaryFn`（`0x800000`）。** 少这一位不报错，WindowServer 直接忽略。
+4. **不要硬编码系统快捷键，读 `com.apple.symbolichotkeys`**（`SystemHotkeys`）。用户能改也能关；键码 `65535` 是「未绑定」占位值。
+5. **不要硬编码字符的虚拟键码。** 键码是物理位置不是字符：键码 8 在 AZERTY 上打 `Z`、Dvorak 上打 `J`。硬编码不是「失效」而是**发出另一个快捷键**（「关闭标签页」在 AZERTY 上变成撤销）。字符一律过 `KeyboardLayout.keyCode(for:)`。
+6. **合成事件必须打魔数**（`kCGEventSourceUserData`），回调第一件事就是检查并放行自己发的事件，否则无限重新插值。
+7. **合成滚动事件必须设 `IsContinuous = 1`**，否则应用把它量化回整行，插值白做。
+8. **反转方向要翻三个字段**：`DeltaAxis` / `PointDelta` / `FixedPtDelta`。漏一个，读那个字段的应用就朝反方向滚。整数字段用整数存取器，浮点字段用浮点存取器。
+9. **帧源不能用 `NSScreen.main`** —— 对无窗口的菜单栏 App 返回 nil，会静默降级到定时器。要取指针所在的那块屏幕。
+10. **必须处理 `tapDisabledByTimeout`**，收到就 `CGEvent.tapEnable` 重开。不处理的话表现为「用一阵子突然失灵」。
+11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置所有老用户的**全部**配置。
+12. **动作不能在 tap 回调里同步执行**，一律 `DispatchQueue.main.async`。回调超时会被系统停用 tap。
+13. **不要在 tap 回调里查最前面的应用**（IPC 往返）。缓存 `frontmostBundleID`，靠 `didActivateApplicationNotification` 失效。
+14. **不要用全局键盘 tap 去探测键码**——那会捕获用户的真实输入。要验证按键是否有效，用「注入 + 读系统日志」：`/usr/bin/log show --predicate 'subsystem == "com.apple.dock"'` 之类。注意注入进程必须存活 ~400ms，否则 WindowServer 不会处理队列（这会造成假阴性）。
+
+## 结构
+
+```
+main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
+                    │
+                    ├─▶ MouseEngine        事件掩码决策、tap 生命周期、权限轮询
+                    │      ├─▶ EventTapController   主 tap（+ 超时自动重启）
+                    │      │      └─▶ EventRouter   放行 / 改写 / 吞掉的判定
+                    │      │             ├─▶ ScrollAnimator
+                    │      │             │     ├─▶ ScrollAxis              一级：指数缓动
+                    │      │             │     ├─▶ ScrollSmoothingFilter   二级：一阶低通
+                    │      │             │     ├─▶ DisplayLinkTicker       vsync 帧源
+                    │      │             │     └─▶ ScrollEventPoster       postToPid 投递
+                    │      │             ├─▶ MouseGestureRecognizer（手势导航）
+                    │      │             └─▶ ActionRunner（按键动作）
+                    │      │                    ├─▶ SystemHotkeys      读系统快捷键配置
+                    │      │                    ├─▶ KeyboardLayout     字符 → 当前布局键码
+                    │      │                    └─▶ SpaceSwitchPacer   桌面切换节流
+                    │      └─▶ EventTapController   motion tap（仅手势期间开启）
+                    │
+                    ├─▶ SettingsStore      JSON 持久化 + ResolvedConfig 快照
+                    ├─▶ ConflictMonitor    同类软件检测（事件驱动，不轮询）
+                    ├─▶ UpdateCoordinator ──▶ UpdateChecker（GitHub Releases）
+                    └─▶ SettingsWindowController ──▶ SwiftUI 设置界面
+```
+
+## 滚动：为什么平滑要分两级
+
+只做插值不够顺。一级的指数缓动每帧发剩余距离的固定比例，问题是**第一帧就是最大的一帧**：默认参数下一格滚轮第一帧直接发 `90 × 0.085 ≈ 7.65px`，这个凭空出现的突起就是起手那下「踢脚」。Mos 用 `ScrollFilter` 解决——它的 `polish` 生成 5 元数组但只有下标 0 和 1 会被读，等效递推是 **α = 0.23 的一阶低通，输出滞后一帧**。
+
+顺序是：**指数缓动产生惯性 → 一阶低通削掉起手突起 → vsync 帧源发送**。滤波器有滞后，所以缓动收敛后动画不能立刻停，必须等滤波器排空，否则每次滚动的尾巴被切掉。
+
+**原始增量取值顺序 `PointDelta` → `FixedPtDelta` → `DeltaAxis`**（与 Mos 的 `usableValue` 一致）。`PointDelta` 含 macOS 自己的滚动加速，滚得快就大；取行数几乎恒为 ±1，快速滚动完全不加速。这也是为什么参数是「最短步长 × 速度增益」而不是一个「单格距离」。
+
+**区分鼠标和触控板看 `kCGScrollWheelEventIsContinuous`**：触控板 / Magic Mouse 为 1（本身就是像素级连续），滚轮鼠标为 0。默认只平滑后者——触控板已经平滑，吞它的事件会破坏手势与惯性。
+
+帧源用 `NSScreen.displayLink`（macOS 14+）而不是已废弃的 `CVDisplayLink`（后者在显示器唤醒 / 重连时会先报过渡刷新率，绑上去就只按低帧率绘制，见 Mos issue #958）。帧源跑在独立线程的 run loop：事件 tap 和 SwiftUI 都在主 run loop，设置窗口重排版时不能拖慢滚动帧。
+
+## 按键动作
+
+整张映射表是 `ActionRunner.stroke(for:)` 里一个对 `MouseAction` **穷尽的 `switch`**。这是刻意的：新增动作忘了实现会**直接编译不过**。「选得到但没反应」在这个项目里出现过两次，所以这一类 bug 交给编译器兜。不要退回成两张表（`run()` 一张、自检钉另一张）——那样自检钉住的和实际跑的不是同一份。
+
+几个特殊路径：
+
+- **⌘⇥ 需要真的按下 ⌘ 键。** App switcher 读的是系统的修饰键状态而不是事件 flags，只设 `maskCommand` 完全没反应（保留 / 释放修饰键两种都试过）。必须先发 ⌘ 键自己的 `flagsChanged`。见 `keyStrokeWithRealModifiers`。
+- **桌面切换必须节流，这不是冷却。** macOS 把空间切换做成动画，动画期间收到的请求是**丢弃**而不是排队。`SpaceSwitchPacer`：0.12s 间隔（Mos 同值），最多积压 2 步，**反向时丢弃积压**（往回划的人想立刻回去，不是想撤销队列）。
+- **媒体键不是键码**，走 `NSEvent.otherEvent(with: .systemDefined, subtype: 8)` + `NX_KEYTYPE_*` 装在 `data1`。
+- **功能行键码要一个个实测**：`160` = 调度中心、`131` = 启动台、`178` = 控制中心，在 macOS 26.6 上验证有效。`177`（聚焦）与 `176`（听写）实测**已失效**，故意没收入——宁可没有这一项，不要一个选得到但不动的选项。注意 Mos 的标识符 `appExpose` 看名字像「应用程序窗口」，但它界面上写的是「启动台」；名字不是证据，日志才是。
+
+## 手势导航
+
+**按下被吞掉之后，位移事件换了类型。** 绑定了动作的侧键，其 `otherMouseDown` 被吞掉后系统认为它从未按下，后续移动不再是 `otherMouseDragged` 而是普通的 **`mouseMoved`**。所以有第二个 motion tap，订阅四种位移事件，**只在手势进行中开启**（`mouseMoved` 是系统里最密集的事件流，没手势时没理由让每次移动都过一遍回调）。
+
+**不能只读增量字段。** 某些鼠标发的 `otherMouseDragged` 三个增量字段全是 0，只读它们的话累积位移永远是 0，每次按住都被判成「原地单击」。识别器用事件坐标做差分，增量字段非零时才优先采信（屏幕边缘会夹住坐标，那时差分为 0 而增量字段仍然对）。
+
+阈值：40px 才算划动，某轴要比另一轴多 1.2 倍（避免斜划乱猜），≤10px 算原地单击。**一次按住只触发一个动作**，否则一次长划反复越过阈值会跳三个桌面。横向刻意反向（左划 = 切到右边的桌面），与触控板同向。
+
+## 约定
+
+- `.swiftLanguageMode(.v5)`。事件 tap 天生是 C 函数指针回调 + `Unmanaged`，Swift 6 的严格隔离会让这层充满仪式性样板。
+- 跨线程共享状态统一走 `Locked`（`OSAllocatedUnfairLock`）：配置快照、动画状态、滤波器、计数器。
+- 界面文案全部集中在 `Strings.swift`，目前只有中文。
+- 设置界面遵循 `macos-settings-ui` skill 的写法（`NSWindowController` + `.fullSizeContentView` + 透明 `Form`）。
+- 诊断日志走 `Trace`（`os.Logger`）。读的时候用 `/usr/bin/log`——`log` 在这台机器上被 shell 函数遮蔽了。
+- 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询。
+
+## 测试为什么是 `--self-check`
+
+XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有——只装 CLT 的机器连测试 target 都编译不出来。所以断言放在 app target 内，`OpenMouse --self-check` 跑，任何能构建的机器都能跑，对已发布的构建也是可用的诊断。装了完整 Xcode 之后搬进 `@Test` 是机械改写。
+
+自检里「Mos 手感对齐」那组把 `33.6`、`2.70`、`1 - √(4.35/5.2)`、`0.23` 钉住了，参数被误改立刻失败。**上面每条约束都对应一条断言——修 bug 之后要补一条，别让同一个 bug 回来第二次。**
+
+## 参考实现
+
+`~/workspace/Mos` 有 Mos 源码（我 fork 的分支 `codex/mouse-gesture-navigation`，PR Caldis/Mos#1023 是我加的手势识别）。**鼠标行为的事实来源是那份源码，不要凭记忆。** 手感参数与交互模式照抄成熟工具，不要自己发明数值。
+
+## 签名与权限
+
+TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。构建脚本按证书**哈希**而不是名字挑证书（钥匙串里常有多张同名证书，用名字会让 `codesign` 报 ambiguous）。固定签名身份时授权能扛过反复重新构建，但**刚重新签名后的第一次启动**可能短暂读不到授权——下次启动就恢复。所以不要在构建已是最新时重新签名。彻底重来用 `make tcc-reset`。

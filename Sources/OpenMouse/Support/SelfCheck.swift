@@ -27,7 +27,7 @@ enum SelfCheck {
             sameDirectionAccumulates()
             rateIsBounded()
         }
-        group("应用例外规则") {
+        group("应用规则") {
             globalFallback()
             bypassRule()
             customRule()
@@ -37,7 +37,7 @@ enum SelfCheck {
             defaultAction()
             modifierVariant()
             inactiveDetection()
-            dragDetection()
+            motionMaskCoversPlainMovement()
         }
         group("手势导航") {
             commitsDominantAxis()
@@ -45,6 +45,8 @@ enum SelfCheck {
             firesOncePerHold()
             treatsStillHoldAsClick()
             mapsDirectionsLikeLogiOptions()
+            measuresFromLocationWhenDeltasAreEmpty()
+            prefersDeltaFieldsWhenPresent()
         }
         group("动作选择器") {
             actionKindRoundTrip()
@@ -69,6 +71,26 @@ enum SelfCheck {
             travelFloorsThenScales()
             filterRemovesLeadingJump()
             filterConvergesAndDrains()
+        }
+        group("动作实现完整性") {
+            everyActionHasAStroke()
+            noTwoActionsSendTheSameKeys()
+        }
+        group("键盘布局") {
+            resolvesCharactersOnLiveLayout()
+            hasFallbackForEveryCharacter()
+        }
+        group("桌面切换节流") {
+            queuesRapidSwitches()
+            reversalDiscardsBacklog()
+            capsTheQueue()
+        }
+        group("事件投递") {
+            tapsWhereTargetIsAnnotated()
+            refusesUndeliverableTarget()
+        }
+        group("系统快捷键") {
+            windowManagementStrokesCarryFn()
         }
         group("更新检查") {
             hasDefaultUpdateSource()
@@ -288,19 +310,55 @@ enum SelfCheck {
         )
     }
 
-    private static func dragDetection() {
-        expect(!EventRouter.needsDragEvents([]), "空配置不监听拖动事件")
+    /// The gesture feature is driven by pointer movement that arrives as `.mouseMoved`,
+    /// because the button-down is swallowed and the system therefore never starts a drag.
+    /// Leaving that type out of the mask is what made the feature silently do nothing.
+    private static func motionMaskCoversPlainMovement() {
+        let mask = MouseEngine.motionMask
         expect(
-            !EventRouter.needsDragEvents([ButtonBinding(button: 2, action: .mute)]),
-            "普通动作不需要拖动事件"
+            mask & (1 << CGEventType.mouseMoved.rawValue) != 0,
+            "手势的移动掩码包含 .mouseMoved（吞掉按下后系统不进入拖拽，移动只会以此类型送出）"
         )
         expect(
-            EventRouter.needsDragEvents([ButtonBinding(button: 2, action: .dragScroll)]),
-            "拖动滚动会让事件掩码加上拖动事件"
+            mask & (1 << CGEventType.otherMouseDragged.rawValue) != 0,
+            "手势的移动掩码同时包含 .otherMouseDragged"
         )
     }
 
     // MARK: Gesture navigation
+
+    /// Real mice were observed delivering `.otherMouseDragged` with both delta fields at
+    /// zero, so a recognizer that only accumulated deltas measured no movement at all and
+    /// ended every gesture as "never moved". The location has to be able to carry it.
+    private static func measuresFromLocationWhenDeltasAreEmpty() {
+        var recognizer = MouseGestureRecognizer()
+        recognizer.begin(at: CGPoint(x: 500, y: 500))
+        var fired: MouseGestureDirection?
+        for step in 1...8 {
+            let point = CGPoint(x: 500, y: 500 - Double(step) * 10)
+            if let direction = recognizer.append(location: point, fieldDeltaX: 0, fieldDeltaY: 0) {
+                fired = fired ?? direction
+            }
+        }
+        expect(fired == .up, "位移字段为 0 时改用事件坐标测量，仍能识别方向")
+        expectClose(recognizer.maximumDistanceFromOrigin, 80, "累积位移取自坐标差")
+        expect(!recognizer.shouldTreatAsClick, "有真实移动时不会被误判成原地单击")
+    }
+
+    /// The delta fields keep counting when the pointer is clamped at a screen edge, where the
+    /// location stops changing — so when they carry something, they win.
+    private static func prefersDeltaFieldsWhenPresent() {
+        var recognizer = MouseGestureRecognizer()
+        let edge = CGPoint(x: 1919, y: 500)
+        recognizer.begin(at: edge)
+        var fired: MouseGestureDirection?
+        for _ in 1...6 {
+            if let direction = recognizer.append(location: edge, fieldDeltaX: 12, fieldDeltaY: 0) {
+                fired = fired ?? direction
+            }
+        }
+        expect(fired == .right, "指针被屏幕边缘卡住、坐标不再变化时，改用位移字段")
+    }
 
     private static func commitsDominantAxis() {
         var up = MouseGestureRecognizer()
@@ -378,9 +436,19 @@ enum SelfCheck {
     }
 
     private static func groupsAreComplete() {
-        let grouped = ActionKind.groups.flatMap(\.1)
-        expect(Set(grouped) == Set(ActionKind.allCases), "选择器分组覆盖了所有动作")
-        expect(grouped.count == ActionKind.allCases.count, "没有动作被分到两个组")
+        // The picker renders `ungrouped` at the top level and `groups` as submenus. Anything
+        // missing from both is an action the user simply cannot select.
+        let listed = ActionKind.ungrouped + ActionKind.groups.flatMap(\.1)
+        expect(Set(listed) == Set(ActionKind.allCases), "选择器覆盖了所有动作，没有选不到的")
+        expect(listed.count == ActionKind.allCases.count, "没有动作出现在两个位置")
+        expect(
+            ActionKind.groups.allSatisfy { !$0.1.isEmpty },
+            "没有空的子菜单"
+        )
+        expect(
+            ActionKind.groups.contains { $0.0 == "窗口与桌面" && $0.1.contains(.gestureNavigation) },
+            "手势导航归入「窗口与桌面」"
+        )
     }
 
     // MARK: Conflict detection
@@ -550,6 +618,261 @@ enum SelfCheck {
         expect(!filter.isDraining, "输入停止后滤波会排空（用了 \(frames) 帧）")
     }
 
+    /// The tap layer is a correctness requirement, not a preference.
+    ///
+    /// At `.cghidEventTap` the event's target-process field reports whichever window is
+    /// frontmost rather than the one being scrolled, so every synthesised frame is delivered
+    /// to the wrong process and the wheel appears dead. This shipped once; it is pinned now.
+    private static func tapsWhereTargetIsAnnotated() {
+        expect(
+            EventTapController.tapLocation == .cgAnnotatedSessionEventTap,
+            "事件监听在 annotated session 层（只有这一层带目标进程标注，与 Mos 一致）"
+        )
+        expect(
+            EventTapController.tapPlacement == .tailAppendEventTap,
+            "事件监听挂在链尾（tailAppend，与 Mos 一致）"
+        )
+    }
+
+    /// A notch we cannot re-deliver must be passed through, never swallowed.
+    private static func refusesUndeliverableTarget() {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0
+        ) else {
+            expect(false, "能构造滚轮事件用于投递检查")
+            return
+        }
+
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: 0)
+        expect(
+            ScrollEventPoster.target(from: event) == nil,
+            "目标进程为 0 时拒绝生成投递目标（调用方据此放行事件，最坏退化为不平滑而非滚轮失效）"
+        )
+
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(getpid()))
+        let target = ScrollEventPoster.target(from: event)
+        expect(target != nil, "目标进程有效时生成投递目标")
+        expect(target?.pid == getpid(), "投递目标带上事件标注的目标进程 pid")
+    }
+
+    /// The window-management defaults, pinned against what macOS records in
+    /// `com.apple.symbolichotkeys` on an untouched system.
+    ///
+    /// These were invented once instead of read, and every one of them silently did nothing:
+    /// the gesture was recognised and the keystroke posted, but without the Fn bit the
+    /// WindowServer never treats it as a system shortcut. Nothing errors, so nothing is
+    /// noticed — hence the assertion.
+    private static func windowManagementStrokesCarryFn() {
+        let expected: [(SystemHotkeys.Symbolic, MouseAction, UInt16, CGEventFlags)] = [
+            (.missionControl, .missionControl, 126, [.maskControl, .maskSecondaryFn]),
+            (.applicationWindows, .applicationWindows, 125, [.maskControl, .maskSecondaryFn]),
+            (.showDesktop, .showDesktop, 103, .maskSecondaryFn),
+            (.spaceLeft, .spaceLeft, 123, [.maskControl, .maskSecondaryFn]),
+            (.spaceRight, .spaceRight, 124, [.maskControl, .maskSecondaryFn])
+        ]
+        for (hotkey, action, code, flags) in expected {
+            expect(
+                SystemHotkeys.defaults[hotkey] == SystemHotkeys.Stroke(keyCode: code, flags: flags),
+                "\(ActionKind(action).title) 默认键码 \(code) 且带 Fn 位（对齐系统配置）"
+            )
+            expect(
+                ActionRunner.symbolicHotkey(for: action) == hotkey,
+                "\(ActionKind(action).title) 映射到系统热键 \(hotkey.rawValue)"
+            )
+        }
+        expect(
+            SystemHotkeys.Symbolic.windowManagement.allSatisfy {
+                SystemHotkeys.defaults[$0]?.flags.contains(.maskSecondaryFn) == true
+            },
+            "所有窗口管理动作都带 Fn 位，否则系统不会当成系统快捷键"
+        )
+        // Every ID we can ask about must have a shipped default, or `resolve` force-unwraps nil
+        // on a machine whose plist has no entry for it.
+        expect(
+            SystemHotkeys.Symbolic.allCases.allSatisfy { SystemHotkeys.defaults[$0] != nil },
+            "每个系统热键都有内置默认值，在系统未记录该条目时可回落"
+        )
+        // Anything routed to the system must resolve to an ID; a case that falls through would
+        // be a picker entry that does nothing at all.
+        let systemBacked: [MouseAction] = [
+            .missionControl, .applicationWindows, .showDesktop, .spaceLeft, .spaceRight,
+            .cycleWindows, .spotlight, .screenshotSelection, .screenshotOptions,
+            .toggleDock, .nextInputSource, .quickNote
+        ]
+        expect(
+            systemBacked.allSatisfy { ActionRunner.symbolicHotkey(for: $0) != nil },
+            "所有交给系统快捷键执行的动作都能解析到热键 ID（\(systemBacked.count) 个）"
+        )
+        expect(
+            ActionRunner.fallbackHotkey(for: .spotlight) == .spotlightWindow,
+            "聚焦被停用时回落到聚焦窗口（第三方启动器常只接管其中一个）"
+        )
+        // The function-row keys, each confirmed against the system log on macOS 26.6 rather
+        // than copied from a table. 131 is the one worth pinning: Mos calls it `appExpose`,
+        // its own UI labels it 启动台, and what it actually does is open Spotlight's app
+        // browser — the thing that replaced Launchpad.
+        expect(
+            SystemHotkeys.FunctionKey.appBrowser.stroke
+                == SystemHotkeys.Stroke(keyCode: 131, flags: .maskSecondaryFn),
+            "启动台（浏览所有应用）= 键码 131 + Fn（已用系统日志 .launchAppsBrowsing 证实）"
+        )
+        expect(
+            SystemHotkeys.FunctionKey.missionControl.stroke
+                == SystemHotkeys.Stroke(keyCode: 160, flags: .maskSecondaryFn),
+            "调度中心功能键 = 键码 160 + Fn"
+        )
+        expect(
+            SystemHotkeys.FunctionKey.controlCenter.stroke
+                == SystemHotkeys.Stroke(keyCode: 178, flags: .maskSecondaryFn),
+            "控制中心 = 键码 178 + Fn"
+        )
+        expect(
+            SystemHotkeys.FunctionKey.allCases.allSatisfy { $0.stroke.flags.contains(.maskSecondaryFn) },
+            "功能行按键全部带 Fn 位"
+        )
+        expect(
+            ActionRunner.functionKey(for: .appBrowser) == .appBrowser
+                && ActionRunner.functionKey(for: .controlCenter) == .controlCenter,
+            "启动台与控制中心走功能键路径，不走符号热键"
+        )
+        // Old configs may still hold the removed `launchpad` action; it must decode to
+        // passthrough rather than throwing away the whole binding list.
+        let legacy = Data(#"{"button":3,"action":{"launchpad":{}}}"#.utf8)
+        let decoded = try? JSONDecoder().decode(ButtonBinding.self, from: legacy)
+        expect(decoded?.action == .passthrough, "旧配置里已移除的动作退回「不改变」，不会丢掉整条映射")
+        // A shortcut the user switched off must be reported, not posted as key 65535.
+        expect(
+            SystemHotkeys.Resolution.disabledBySystem != .stroke(SystemHotkeys.defaults[.missionControl]!),
+            "被系统关闭的快捷键与可用快捷键是两种不同结果，不会静默当成可用"
+        )
+    }
+
+    /// Six flicks in two seconds must move six desktops, not two. The system discards a
+    /// switch requested during a transition, so the extra steps have to be held.
+    private static func queuesRapidSwitches() {
+        MainActor.assumeIsolated {
+        var fired: [MouseAction] = []
+        let pacer = SpaceSwitchPacer { fired.append($0) }
+        for _ in 0..<2 { pacer.request(.spaceRight) }
+        // The first fires immediately; the rest are owed.
+        expect(fired.count + pacer.pendingSteps == 2, "连续请求不会被丢弃，未发出的记在队列里")
+        expect(pacer.pendingSteps > 0 || fired.count == 2, "有请求被排队或已全部发出")
+        }
+    }
+
+    private static func reversalDiscardsBacklog() {
+        MainActor.assumeIsolated {
+        var fired: [MouseAction] = []
+        let pacer = SpaceSwitchPacer { fired.append($0) }
+        pacer.request(.spaceRight)
+        pacer.request(.spaceRight)
+        let backlog = pacer.pendingSteps
+        pacer.request(.spaceLeft)
+        expect(backlog >= 0, "向右的请求累积为正数步数")
+        expect(
+            pacer.pendingSteps <= 0,
+            "反向请求会丢弃旧队列而不是逐步回退（回拨时用户要的是立刻回去）"
+        )
+        }
+    }
+
+    private static func capsTheQueue() {
+        MainActor.assumeIsolated {
+        var fired: [MouseAction] = []
+        let pacer = SpaceSwitchPacer { fired.append($0) }
+        for _ in 0..<20 { pacer.request(.spaceRight) }
+        expect(
+            pacer.pendingSteps <= SpaceSwitchPacer.maximumPending,
+            "队列有上限（\(SpaceSwitchPacer.maximumPending) 步），慌乱连甩不会把人送到八个桌面外"
+        )
+        expectClose(SpaceSwitchPacer.interval, 0.12, "切换间隔对齐 Mos 的 0.12 秒")
+        }
+    }
+
+    /// A key code is a physical position, not a letter. The check that matters is the round
+    /// trip: whatever code we resolve for "w" must be a position that actually types "w" on
+    /// the layout in use — otherwise "close tab" sends ⌘Z on French or ⌘, on Dvorak.
+    private static func resolvesCharactersOnLiveLayout() {
+        let needed: [Character] = ["c", "v", "w", "t", "q", "[", "]", "-", "="]
+        var roundTripped = 0
+        var mismatched: [String] = []
+        for character in needed {
+            let code = KeyboardLayout.keyCode(for: character)
+            guard KeyboardLayout.isResolvedFromLiveLayout(character) else { continue }
+            if KeyboardLayout.character(for: code) == character {
+                roundTripped += 1
+            } else {
+                mismatched.append("\(character)→\(code)")
+            }
+        }
+        expect(mismatched.isEmpty, "从当前布局解析出的键码能反向还原为同一字符" + (mismatched.isEmpty ? "（\(roundTripped)/\(needed.count) 项来自实时布局）" : "，不符: \(mismatched.joined(separator: " "))"))
+        expect(
+            needed.allSatisfy { KeyboardLayout.keyCode(for: $0) != 0 },
+            "每个需要的字符都能解析出键码，不会发出键码 0"
+        )
+    }
+
+    /// The fallback is for layouts where a character needs a modifier to type, so it has no
+    /// unmodified position at all. Missing an entry there means posting key code 0.
+    private static func hasFallbackForEveryCharacter() {
+        let needed: [Character] = ["c", "v", "w", "t", "q", "[", "]", "-", "="]
+        expect(
+            needed.allSatisfy { KeyboardLayout.ansiFallback[$0] != nil },
+            "每个字符都有 ANSI 兜底值（读不到实时布局时使用）"
+        )
+        expect(
+            KeyboardLayout.ansiFallback["c"] == 8 && KeyboardLayout.ansiFallback["w"] == 13,
+            "ANSI 兜底值就是标准 kVK_ANSI_* 位置"
+        )
+    }
+
+    /// Every action in the picker must actually do something. `handledElsewhere` is only
+    /// legitimate for the two that are handled by the event router rather than by posting.
+    private static func everyActionHasAStroke() {
+        let handledByRouter: Set<ActionKind> = [.passthrough, .gestureNavigation]
+        var unimplemented: [String] = []
+        for kind in ActionKind.allCases where !handledByRouter.contains(kind) {
+            let action = kind.makeAction(preserving: .passthrough)
+            if ActionRunner.stroke(for: action) == .handledElsewhere {
+                unimplemented.append(kind.title)
+            }
+        }
+        expect(
+            unimplemented.isEmpty,
+            unimplemented.isEmpty
+                ? "全部 \(ActionKind.allCases.count) 个动作都有实现，没有「选得到但没反应」的选项"
+                : "有动作没有实现: \(unimplemented.joined(separator: "、"))"
+        )
+    }
+
+    /// Two picker entries that post the identical keystroke are two names for one thing, which
+    /// is a UI bug and usually a sign one of them was meant to be something else.
+    private static func noTwoActionsSendTheSameKeys() {
+        var seen: [String: String] = [:]
+        var duplicates: [String] = []
+        for kind in ActionKind.allCases {
+            let action = kind.makeAction(preserving: .passthrough)
+            let stroke = ActionRunner.stroke(for: action)
+            switch stroke {
+            case .character, .key, .held, .systemHotkey, .functionKey, .aux:
+                let signature = "\(stroke)"
+                if let existing = seen[signature] {
+                    duplicates.append("\(existing) / \(kind.title)")
+                } else {
+                    seen[signature] = kind.title
+                }
+            default:
+                continue
+            }
+        }
+        expect(
+            duplicates.isEmpty,
+            duplicates.isEmpty
+                ? "没有两个动作发出完全相同的按键"
+                : "重复的动作: \(duplicates.joined(separator: "，"))"
+        )
+    }
+
     private static func survivesJSONRoundTrip() {
         var prefs = Preferences()
         prefs.scroll.minimumStep = 64
@@ -570,7 +893,7 @@ enum SelfCheck {
 
     private static func hasDefaultUpdateSource() {
         let settings = UpdateSettings()
-        expect(settings.repository.contains("/"), "默认更新源已配置，开箱即可检查更新")
+        expect(UpdateSettings.repository.contains("/"), "更新源已内置，开箱即可检查更新")
         expect(settings.checkAutomatically, "默认开启自动检查")
     }
 

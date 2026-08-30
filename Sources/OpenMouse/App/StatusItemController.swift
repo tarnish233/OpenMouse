@@ -32,6 +32,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // MARK: NSMenuDelegate
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Opening the menu is a good moment to re-check: a warning about an app the user
+        // already quit is worse than no warning.
+        ConflictMonitor.shared.refreshNow()
+        // Cheap, and the only moment the user is looking: pick up shortcuts they may have just
+        // changed in System Settings without making them relaunch.
+        SystemHotkeys.invalidate()
+        KeyboardLayout.invalidate()
         menu.removeAllItems()
         let prefs = store.preferences
 
@@ -41,19 +48,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(toggle(
             title: Strings.menuEnabled,
             isOn: prefs.enabled,
-            action: #selector(toggleEnabled)
+            action: #selector(toggleEnabled),
+            symbol: "power"
         ))
         menu.addItem(toggle(
             title: Strings.menuSmoothing,
             isOn: prefs.scroll.smoothingEnabled,
             action: #selector(toggleSmoothing),
-            enabled: prefs.enabled
+            enabled: prefs.enabled,
+            symbol: "wind"
         ))
         menu.addItem(toggle(
             title: Strings.menuReverse,
             isOn: prefs.scroll.reverseVertical,
             action: #selector(toggleReverse),
-            enabled: prefs.enabled
+            enabled: prefs.enabled,
+            symbol: "arrow.up.arrow.down"
         ))
 
         menu.addItem(.separator())
@@ -69,17 +79,31 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 keyEquivalent: ""
             )
             entry.target = self
+            entry.image = Self.symbol(isExcluded ? "checkmark.circle" : "nosign")
             menu.addItem(entry)
             menu.addItem(.separator())
         }
 
         let settings = NSMenuItem(title: Strings.menuSettings, action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
+        settings.image = Self.symbol("gearshape")
         menu.addItem(settings)
 
         let quit = NSMenuItem(title: Strings.menuQuit, action: #selector(quit), keyEquivalent: "q")
         quit.target = self
+        quit.image = Self.symbol("xmark.circle")
         menu.addItem(quit)
+    }
+
+    /// Menu items are sized for a small template image; without a configuration the symbol
+    /// renders at whatever its intrinsic size is and the rows end up unevenly tall.
+    private static func symbol(_ name: String) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        let configured = image.withSymbolConfiguration(
+            .init(pointSize: 13, weight: .regular)
+        )
+        configured?.isTemplate = true
+        return configured
     }
 
     private func statusHeader() -> NSMenuItem {
@@ -92,6 +116,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         let entry = NSMenuItem(title: text, action: nil, keyEquivalent: "")
         entry.isEnabled = false
+        entry.image = Self.symbol(MouseEngine.shared.status.isRunning ? "checkmark.seal" : "exclamationmark.triangle")
         return entry
     }
 
@@ -99,12 +124,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         title: String,
         isOn: Bool,
         action: Selector,
-        enabled: Bool = true
+        enabled: Bool = true,
+        symbol: String? = nil
     ) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
         entry.target = self
         entry.state = isOn ? .on : .off
         entry.isEnabled = enabled
+        if let symbol { entry.image = Self.symbol(symbol) }
         return entry
     }
 

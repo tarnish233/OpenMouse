@@ -33,16 +33,45 @@ final class MouseEngine {
     private let store = SettingsStore.shared
     private let router: EventRouter
     private let tap: EventTapController
+    /// A second tap, for pointer movement only, brought up while a gesture button is held.
+    ///
+    /// Kept separate from the main tap because it is the expensive one: `.mouseMoved` fires
+    /// on every pixel of pointer travel, and a gesture button is held for maybe a second at a
+    /// time. Subscribing permanently would mean paying that cost all day for a feature that
+    /// is almost always idle.
+    private let motionTap: EventTapController
     private var permissionPoll: Timer?
 
     private init() {
         let router = EventRouter(config: store.snapshot)
         self.router = router
-        tap = EventTapController { proxy, type, event in
+        tap = EventTapController(label: "main") { proxy, type, event in
+            router.handle(proxy: proxy, type: type, event: event)
+        }
+        motionTap = EventTapController(label: "motion") { proxy, type, event in
             router.handle(proxy: proxy, type: type, event: event)
         }
         tap.onAutoReenable = { [weak self] in
             MainActor.assumeIsolated { self?.autoReenableCount += 1 }
+        }
+        // A tap the system disabled mid-hold will never see the button-up, so the gesture
+        // session has to be torn down explicitly or it stays armed forever.
+        motionTap.onAutoReenable = { [weak self] in
+            MainActor.assumeIsolated { self?.router.cancelGestures() }
+        }
+        router.onGestureActivityChanged = { [weak self] isActive in
+            guard isActive else {
+                // Tearing a run-loop source down underneath the callback that is running is
+                // not something to do inline, and being late to stop costs nothing.
+                Task { @MainActor [weak self] in self?.setMotionTapRunning(false) }
+                return
+            }
+            // Starting, however, must be synchronous. This fires from the button-down
+            // callback on the main run loop; deferring it to the next turn means the tap
+            // comes up after the swipe has already started, and a fast flick delivers only a
+            // handful of movement events — far short of the activation distance. That reads
+            // as "the gesture does nothing".
+            MainActor.assumeIsolated { self?.setMotionTapRunning(true) }
         }
     }
 
@@ -56,6 +85,8 @@ final class MouseEngine {
 
     func stop() {
         tap.stop()
+        motionTap.stop()
+        router.cancelGestures()
         router.cancelInFlightScrolling()
         status = .off
     }
@@ -67,6 +98,8 @@ final class MouseEngine {
 
         guard prefs.enabled || isCapturingButton else {
             tap.stop()
+            motionTap.stop()
+            router.cancelGestures()
             router.cancelInFlightScrolling()
             status = .off
             return
@@ -125,11 +158,29 @@ final class MouseEngine {
         if activeButtons {
             mask |= 1 << CGEventType.otherMouseDown.rawValue
             mask |= 1 << CGEventType.otherMouseUp.rawValue
-            if EventRouter.needsDragEvents(prefs.buttons) {
-                mask |= 1 << CGEventType.otherMouseDragged.rawValue
-            }
         }
         return mask
+    }
+
+    /// Pointer movement, in every form it can arrive as while a button is held.
+    ///
+    /// `.mouseMoved` is the one that matters and the one that is easy to leave out: the
+    /// gesture button's press is swallowed, so the system never starts a drag and the
+    /// movement is not `.otherMouseDragged`. The drag types are here for the case where the
+    /// user is holding another button at the same time.
+    nonisolated static let motionMask: CGEventMask =
+        (1 << CGEventType.mouseMoved.rawValue)
+        | (1 << CGEventType.otherMouseDragged.rawValue)
+        | (1 << CGEventType.leftMouseDragged.rawValue)
+        | (1 << CGEventType.rightMouseDragged.rawValue)
+
+    private func setMotionTapRunning(_ shouldRun: Bool) {
+        guard shouldRun else {
+            motionTap.stop()
+            return
+        }
+        guard !motionTap.isRunning, AccessibilityPermission.isTrusted else { return }
+        motionTap.start(mask: Self.motionMask)
     }
 
     // MARK: Observation

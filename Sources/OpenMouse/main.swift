@@ -9,7 +9,8 @@ if CommandLine.arguments.contains("--self-check") {
 // `OpenMouse --check-update <owner/repo>` exercises the real network path and exits, so the
 // updater can be verified without waiting for the daily automatic check.
 if let index = CommandLine.arguments.firstIndex(of: "--check-update") {
-    let repository = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : ""
+    let override = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : ""
+    let repository = override.hasPrefix("-") || override.isEmpty ? UpdateSettings.repository : override
     let semaphore = DispatchSemaphore(value: 0)
     var code: Int32 = 1
     Task {

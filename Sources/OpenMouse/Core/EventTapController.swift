@@ -8,15 +8,31 @@ import Foundation
 final class EventTapController {
     typealias Handler = (CGEventTapProxy, CGEventType, CGEvent) -> Unmanaged<CGEvent>?
 
+    /// The *annotated* session tap, and the annotation is the whole point: only at this layer
+    /// does the system fill in `kCGEventTargetUnixProcessID` with the process the event is
+    /// actually routed to. Tap the raw HID stream instead and that field reports whichever
+    /// window is merely frontmost, so every synthesised frame gets delivered to the wrong
+    /// process — scrolling a window that does not have focus (which macOS allows) then does
+    /// nothing at all. Mos taps here for the same reason.
+    static let tapLocation: CGEventTapLocation = .cgAnnotatedSessionEventTap
+
+    /// Tail, not head: let anything already installed see the event first, and take what
+    /// survives. Head-inserting puts us ahead of drivers that legitimately rewrite wheel
+    /// events before we scale them.
+    static let tapPlacement: CGEventTapPlacement = .tailAppendEventTap
+
     private var machPort: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private let handler: Handler
+    /// Names this tap in the log; there is more than one and they fail differently.
+    private let label: String
 
     private(set) var isRunning = false
     /// Called when the system disables the tap so the app can surface it.
     var onAutoReenable: (() -> Void)?
 
-    init(handler: @escaping Handler) {
+    init(label: String, handler: @escaping Handler) {
+        self.label = label
         self.handler = handler
     }
 
@@ -28,8 +44,17 @@ final class EventTapController {
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let port = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
+            // The *annotated* session tap, and the annotation is the whole point: only at
+            // this layer does the system fill in `kCGEventTargetUnixProcessID` with the
+            // process the event is actually routed to. Tap the raw HID stream instead and
+            // that field reports whichever window is merely frontmost, so every synthesised
+            // frame gets delivered to the wrong process — scrolling a window that does not
+            // have focus (which macOS allows) then does nothing at all.
+            tap: Self.tapLocation,
+            // Tail, not head: let anything already installed see the event first, and take
+            // what survives. Head-inserting puts us ahead of drivers that legitimately
+            // rewrite wheel events before we scale them.
+            place: Self.tapPlacement,
             // `.defaultTap` (not `.listenOnly`) is required because we rewrite and
             // swallow events. That is also why Accessibility permission is mandatory.
             options: .defaultTap,
@@ -41,6 +66,7 @@ final class EventTapController {
             },
             userInfo: refcon
         ) else {
+            Trace.tapStarted(kind: label, mask: mask, ok: false)
             return false
         }
 
@@ -49,6 +75,7 @@ final class EventTapController {
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
         isRunning = true
+        Trace.tapStarted(kind: label, mask: mask, ok: true)
         return true
     }
 
@@ -60,9 +87,11 @@ final class EventTapController {
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
+        let wasRunning = isRunning
         machPort = nil
         runLoopSource = nil
         isRunning = false
+        if wasRunning { Trace.tapStopped(kind: label) }
     }
 
     private func dispatch(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {

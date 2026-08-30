@@ -121,9 +121,17 @@ enum MouseAction: Codable, Equatable, Hashable, Sendable {
     case missionControl
     case applicationWindows
     case showDesktop
-    case launchpad
     case spaceLeft
     case spaceRight
+    case cycleWindows
+    case appBrowser
+    case controlCenter
+    case spotlight
+    case screenshotSelection
+    case screenshotOptions
+    case toggleDock
+    case nextInputSource
+    case quickNote
     case navigateBack
     case navigateForward
     case zoomIn
@@ -139,10 +147,39 @@ enum MouseAction: Codable, Equatable, Hashable, Sendable {
     case volumeUp
     case volumeDown
     case mute
+    case escapeKey
+    case switchApp
+    case switchAppReverse
+    case minimizeWindow
+    case hideApplication
+    case hideOthers
+    case closeAllWindows
+    case quitApp
+    case cut
+    case undo
+    case redo
+    case selectAll
+    case find
+    case nextTab
+    case previousTab
+    case newFinderWindow
+    case newFolder
+    case moveToTrash
+    case emptyTrash
+    case duplicateFile
+    case getInfo
+    case goToFolder
+    case viewAsIcons
+    case viewAsList
+    case viewAsColumns
+    case viewAsGallery
+    case screenshotToFile
+    case characterViewer
+    case forceQuit
+    case logout
+    case invertColors
     case keyStroke(KeyCombo)
     case launchApp(path: String)
-    /// Hold this button and move the mouse to scroll — logiops-style "gesture" lite.
-    case dragScroll
     /// Hold this button and flick a direction to navigate: up = Mission Control,
     /// down = App Exposé, left/right = switch desktop. A click without moving opens
     /// Mission Control. Mirrors the Logi Options+ gesture button.
@@ -254,12 +291,11 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
 // MARK: - Updates
 
 struct UpdateSettings: Codable, Equatable, Sendable {
-    /// Where releases are published. Overridable in the UI so a fork can point elsewhere;
-    /// the default is this project's own repository so update checking works out of the box.
-    static let defaultRepository = "tarnish233/OpenMouse"
+    /// Where releases are published. Fixed, not a setting: pointing the updater at an
+    /// arbitrary repository is a way to get talked into installing someone else's build, and
+    /// a fork that wants its own release feed can change this line.
+    static let repository = "tarnish233/OpenMouse"
 
-    /// `owner/repo` on GitHub. Empty means no update source is configured.
-    var repository = UpdateSettings.defaultRepository
     var checkAutomatically = true
     /// Seconds since 1970 of the last completed check, so a launch does not re-check
     /// immediately after the previous one.
@@ -275,7 +311,6 @@ struct UpdateSettings: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        repository = (try? c.decode(String.self, forKey: .repository)) ?? Self.defaultRepository
         checkAutomatically = (try? c.decode(Bool.self, forKey: .checkAutomatically)) ?? true
         lastCheckedAt = try? c.decode(Double.self, forKey: .lastCheckedAt)
         skippedVersion = try? c.decode(String.self, forKey: .skippedVersion)

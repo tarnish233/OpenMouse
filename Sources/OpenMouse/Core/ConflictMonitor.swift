@@ -27,19 +27,30 @@ final class ConflictMonitor {
     private init() {}
 
     func start() {
-        refresh()
+        refresh(trigger: "start")
         let center = NSWorkspace.shared.notificationCenter
+        // `didTerminate` is the one that clears the warning, and it is not guaranteed: an app
+        // that was killed, or that never registered as a GUI app, never sends it. Activation
+        // is a cheap extra trigger that covers those — the user has to click *somewhere* after
+        // quitting the other app, and this costs nothing while idle.
         for name in [
             NSWorkspace.didLaunchApplicationNotification,
-            NSWorkspace.didTerminateApplicationNotification
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didActivateApplicationNotification
         ] {
-            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated { self?.refresh(trigger: note.name.rawValue) }
             }
         }
     }
 
-    private func refresh() {
+    /// Re-check on demand, for the moments where a stale warning would be most visible:
+    /// opening the menu or the settings window.
+    func refreshNow() {
+        refresh(trigger: "manual")
+    }
+
+    private func refresh(trigger: String) {
         let ourBundleID = Bundle.main.bundleIdentifier
         let running: [(bundleID: String, name: String)] = NSWorkspace.shared.runningApplications
             .compactMap { app in
@@ -47,7 +58,9 @@ final class ConflictMonitor {
                 return (id, app.localizedName ?? id)
             }
         let found = Self.conflicts(among: running)
-        if found != conflicts { conflicts = found }
+        guard found != conflicts else { return }
+        conflicts = found
+        Trace.conflicts(found.map(\.name), trigger: trigger)
     }
 
     // MARK: Matching (pure, so it can be checked without a live conflict)
