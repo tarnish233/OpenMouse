@@ -34,10 +34,12 @@ install: app
 ## Run the built-in logic checks
 test:
 	swift run -c debug OpenMouse --self-check
+	./Scripts/test-distribution-signature.sh
 
 ## Zip the signed bundle for a GitHub release.
 ## ditto, not zip: it preserves the bundle's signature and resource forks.
-dist: app
+dist:
+	DISTRIBUTION=1 ./Scripts/bundle.sh
 	rm -f "build/OpenMouse-$(VERSION).zip"
 	ditto -c -k --sequesterRsrc --keepParent "$(APP)" "build/OpenMouse-$(VERSION).zip"
 	@shasum -a 256 "build/OpenMouse-$(VERSION).zip"

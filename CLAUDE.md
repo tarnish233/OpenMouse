@@ -15,8 +15,8 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检（215 项，必须全过）
-make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
+make test     # 内置自检 215 项 + 发布签名脚本检查 6 项，必须全过
+CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
 ```
@@ -176,6 +176,8 @@ XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有—�
 ## 签名与权限
 
 TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。`Scripts/bundle.sh` 按证书**哈希**而不是名字挑证书（钥匙串里常有多张同名证书，用名字会让 `codesign` 报 ambiguous）。固定签名身份时授权能扛过反复重新构建，但**刚重新签名后的第一次启动**可能短暂读不到授权——下次启动就恢复。所以不要在构建已是最新时重新签名。彻底重来用 `make tcc-reset`。
+
+`make dist` 与日常 `make app` 的签名策略不同：发布必须显式传 `CODESIGN_IDENTITY`，使用 Developer ID Application + hardened runtime + Apple 安全时间戳；`bundle.sh` 会读回 Authority / Timestamp / runtime flags，任一不符直接失败。不要为了“先出包”绕过 `validate-distribution-signature.sh`。
 
 ## git
 

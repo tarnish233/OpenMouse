@@ -15,7 +15,7 @@
 | 2 | F3 | **已修复并核实**（自检 143 → 145 项） |
 | 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | **已复核并完成**（F4 核心结论驳回；自检 145 → 152 项） |
 | 4 | F7、F9、F10、F11 | **已修复并核实**（自检 152 → 183 项） |
-| 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | **进行中**（除 F15 外均已处理；自检 183 → 215 项） |
+| 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | **已修复并核实**（自检 183 → 215 项，另有 6 项发布签名检查） |
 
 第 1 批的核实方式：读代码确认锁序无反转（animator 锁 → ticker 锁，三个调用点方向一致）、真机 26 段滑行放大稳定在 9.6x 且无投递失败、空闲 CPU 0.0%。遗留的三点小问题记在 §6 末尾。
 
@@ -25,7 +25,7 @@
 
 第 4 批把「按下时的所有权」收成 `buttonClaims`，mouse-up 不再重新解析可变配置；`MouseEngine` 的 off / needsPermission / failed / stop 统一走 teardown，同时停止两条 tap、滚动、按键会话和权限轮询；两种系统禁用原因都经过同一恢复钩子；连续设备平滑、透传和无目标回退共用一份反向策略。release 构建通过，`make test` 183/183。
 
-第 5 批第一子批完成 F8、C1、C2、C4：未录入快捷键改用 `KeyCombo.unset` 且投递前拒绝；设置窗口通过幂等 activation lease 持有引用；版本读取失败显示「未知」；用户可写系统快捷键数值使用 exact narrowing。release 构建通过，`make test` 195/195。第二子批完成 F6：选择“不替用户猜斜划方向”，所有未形成主轴方向的输入在抬起时回落为手势按钮单击；自检 197/197。第三子批完成 F12：滚动规则按事件 target pid 经通知维护的 bundle-id 快照解析，未知 pid 回落全局规则，tap 回调不做 IPC；自检 202/202。第四子批完成 F13/F14：版本比较改为三态并拒绝损坏/溢出分量；自动检查按持久化时间设置真实定时器、唤醒后重算，失败仅做 1 小时内存退避；更新 UI 实际消费 `pendingRelease` 过滤跳过版本。自检 215/215。
+第 5 批第一子批完成 F8、C1、C2、C4：未录入快捷键改用 `KeyCombo.unset` 且投递前拒绝；设置窗口通过幂等 activation lease 持有引用；版本读取失败显示「未知」；用户可写系统快捷键数值使用 exact narrowing。release 构建通过，`make test` 195/195。第二子批完成 F6：选择“不替用户猜斜划方向”，所有未形成主轴方向的输入在抬起时回落为手势按钮单击；自检 197/197。第三子批完成 F12：滚动规则按事件 target pid 经通知维护的 bundle-id 快照解析，未知 pid 回落全局规则，tap 回调不做 IPC；自检 202/202。第四子批完成 F13/F14：版本比较改为三态并拒绝损坏/溢出分量；自动检查按持久化时间设置真实定时器、唤醒后重算，失败仅做 1 小时内存退避；更新 UI 实际消费 `pendingRelease` 过滤跳过版本。自检 215/215。第五子批完成 F15：`make dist` 强制显式 Developer ID、hardened runtime 与安全时间戳，签名读回校验不过即失败；`make test` 新增 6 项 shell 检查。
 
 `CLAUDE.md` 里 §4 指出的两句假话已经改掉了（约束 11 的覆盖范围、测试一节声称的断言覆盖）。
 
@@ -60,7 +60,7 @@
 | F12 | `Model/Settings.swift:381` | 应用规则按最前应用取，事件按 `postToPid` 投——两者不同一时规则用错进程 | **已修复（第 5 批）** |
 | F14 | `Core/UpdateCoordinator.swift:29` | 「每 24 小时」实际是「每次启动一次」；`跳过此版本` 写了个没人读的字段 | **已修复（第 5 批）** |
 | F13 | `Core/UpdateChecker.swift:38` | 解析不出的版本号被报成「已是最新版本」 | **已修复（触发可控，但陷阱真实）** |
-| F15 | `Scripts/bundle.sh:41` | `make dist` 可能用开发证书签名，产出无法公证、别人打不开的包 | 已确认 |
+| F15 | `Scripts/bundle.sh:41` | `make dist` 可能用开发证书签名，产出无法公证、别人打不开的包 | **已修复（第 5 批）** |
 
 ---
 
@@ -444,7 +444,7 @@ let built = build() ?? [:]
 
 **第 5 批复核与修复结果**：当前发布标签确实由维护者控制，所以这不是已经发生的用户故障；但三态缺失和 `compactMap` 左移溢出分量的代码陷阱真实存在，且 C2 的「未知」版本会直接触发。`isNewer` 现返回 `Bool?`，空、带非 v 前缀、空分量和 UInt64 溢出均为 nil；网络检查把 nil 映射为 `.failed`，不会写入 24 小时抑制时间。自检覆盖报告样例、空分量、溢出分量和当前版本未知。
 
-### F15 —— `make dist` 可能用开发证书签名（已确认）
+### F15 —— `make dist` 可能用开发证书签名（已确认；第 5 批已修复）
 
 **位置**：`Scripts/bundle.sh:41`
 
@@ -467,6 +467,8 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 日常 `make app` / `make run` 用开发证书是完全合理的——**只有 `dist` 这条路需要收紧**。
 
 **应补断言**：这条在 shell 层，`--self-check` 覆盖不到。让 `dist` 自己在打包前校验签名（`codesign -dv` 读回 Authority 并检查是不是 Developer ID）。
+
+**第 5 批修复结果**：`make dist` 不再依赖普通 `app` 目标，而以 `DISTRIBUTION=1` 调用 bundle；未显式传 `CODESIGN_IDENTITY` 会在构建前失败。发布模式只用 `--options runtime --timestamp`，随后 `codesign -dvvv` 的 Authority、Timestamp 与 runtime flags 必须全部通过 `validate-distribution-signature.sh` 才会打 zip。`make test` 新增 6 项 shell 检查，覆盖有效 Developer ID、Apple Development 拒绝、缺时间戳拒绝、缺 runtime 拒绝和两条构建接线；另实测无 identity 时 fail-fast。
 
 ---
 
@@ -608,8 +610,8 @@ F4（连注释一起改）、F2（含 `:70` 的失败缓存）。同时处理 §
 **第 4 批 —— 事件路由与生命周期（P2，已完成）**
 F7、F9、F10、F11 已统一收口：button claim 决定释放、引擎 teardown 收敛所有非运行态、两种 tap disable 原因共用恢复钩子、连续设备共用反向策略。自检 152 → 183 项。
 
-**第 5 批 —— 其余（P2）**
-F8、F6、F12、F14、F13、F15，以及 C1、C2、C4。
+**第 5 批 —— 其余（P2，已完成）**
+F8、F6、F12、F14、F13、F15，以及 C1、C2、C4 均已处理；自检 215 项，发布签名检查 6 项。
 
 **贯穿全程**：每修一条补一条断言（§4.1 表里那七条零覆盖的约束是优先项），并同步修正 CLAUDE.md 第 83 行和第 166 行——**不要只是把话改软，要让代码真的成立**。
 

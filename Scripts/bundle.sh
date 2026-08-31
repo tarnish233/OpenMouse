@@ -8,10 +8,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 CONFIG="${CONFIG:-release}"
+DISTRIBUTION="${DISTRIBUTION:-0}"
 APP_NAME="Open Mouse"
 EXECUTABLE="OpenMouse"
 OUT_DIR="${OUT_DIR:-$ROOT/build}"
 APP="$OUT_DIR/$APP_NAME.app"
+
+if [ "$DISTRIBUTION" = "1" ] && [ -z "${CODESIGN_IDENTITY:-}" ]; then
+  echo "error: make dist requires an explicit Developer ID Application identity" >&2
+  echo "       use: CODESIGN_IDENTITY=<certificate SHA-1> make dist" >&2
+  exit 1
+fi
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
@@ -33,9 +40,9 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   IDENTITY="$CODESIGN_IDENTITY"
   IDENTITY_LABEL="$CODESIGN_IDENTITY"
 else
-  # Select by SHA-1 hash, not by name: a keychain commonly holds several certificates with
-  # the identical "Apple Development: ..." common name, and codesign then refuses as
-  # ambiguous. Revoked certificates are filtered out first.
+  # Development bundles may auto-select a stable identity. Distribution never enters this
+  # branch: it requires the maintainer to name the intended Developer ID certificate.
+  # Select by SHA-1 hash, not by name, because duplicate common names are common.
   IDENTITY_LINE="$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -v CSSMERR \
     | grep -E '"(Apple Development|Developer ID Application)' \
@@ -46,12 +53,24 @@ fi
 
 if [ -n "$IDENTITY" ]; then
   echo "==> codesign with: ${IDENTITY_LABEL:-$IDENTITY} [$IDENTITY]"
-  codesign --force --options runtime --timestamp=none \
-    --sign "$IDENTITY" "$APP" 2>&1 | sed 's/^/    /'
+  if [ "$DISTRIBUTION" = "1" ]; then
+    echo "==> distribution signing: hardened runtime + secure timestamp"
+    codesign --force --options runtime --timestamp \
+      --sign "$IDENTITY" "$APP" 2>&1 | sed 's/^/    /'
+  else
+    codesign --force --options runtime --timestamp=none \
+      --sign "$IDENTITY" "$APP" 2>&1 | sed 's/^/    /'
+  fi
 else
   echo "==> codesign ad-hoc (no identity found; Accessibility permission may reset on rebuild)"
   codesign --force --sign - "$APP" 2>&1 | sed 's/^/    /'
 fi
 
-codesign --verify --verbose=1 "$APP" 2>&1 | sed 's/^/    /'
+codesign --verify --strict --verbose=1 "$APP" 2>&1 | sed 's/^/    /'
+if [ "$DISTRIBUTION" = "1" ]; then
+  echo "==> validating distribution signature"
+  SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
+  printf '%s\n' "$SIGNATURE_DETAILS" | "$ROOT/Scripts/validate-distribution-signature.sh" 2>&1 \
+    | sed 's/^/    /'
+fi
 echo "==> done: $APP"
