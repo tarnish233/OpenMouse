@@ -72,6 +72,7 @@ enum SelfCheck {
             migratesEnumeratedButtons()
             sortsBindings()
             toleratesBrokenSections()
+            preservesBindingsAcrossSchemaChanges()
             survivesJSONRoundTrip()
         }
         group("Mos 手感对齐") {
@@ -855,6 +856,45 @@ enum SelfCheck {
         expect(decoded.scroll.minimumStep == 12.5, "一个片段损坏时其他设置仍被保留")
         expect(decoded.buttons.isEmpty, "无法解析的按键映射退回空列表")
         expect(decoded.rules.isEmpty, "类型不对的字段退回默认值")
+    }
+
+    /// Reproduces F3's data-loss chain: one future action discriminator, one malformed row,
+    /// and a KeyCombo whose schema differs from this build must not erase the valid siblings.
+    private static func preservesBindingsAcrossSchemaChanges() {
+        let json = """
+        {
+          "buttons": [
+            { "button": 3, "action": { "mute": {} } },
+            { "button": 4, "action": { "futureAction": { "payload": 1 } } },
+            { "button": "not-a-number", "action": { "missionControl": {} } },
+            {
+              "button": 5,
+              "action": {
+                "keyStroke": {
+                  "_0": { "keyCode": 8, "futureField": "ignored" }
+                }
+              }
+            },
+            { "button": 6, "action": { "missionControl": {} } }
+          ]
+        }
+        """
+        guard let data = json.data(using: .utf8),
+              var decoded = try? JSONDecoder().decode(Preferences.self, from: data) else {
+            expect(false, "动作或快捷键结构变化时偏好仍能解码")
+            return
+        }
+
+        decoded.normalize()
+        expect(
+            decoded.buttons.map(\.button) == [3, 5, 6],
+            "未知动作和损坏行只跳过自身，其余按键映射全部保留"
+        )
+        expect(
+            decoded.buttons.first(where: { $0.button == 5 })?.action
+                == .keyStroke(KeyCombo(keyCode: 8, modifiers: 0)),
+            "KeyCombo 忽略未知字段，并让缺失字段逐项回落默认值"
+        )
     }
 
     private static func matchesMosFeel() {

@@ -72,7 +72,7 @@ OpenMouse --check-update owner/repo   # 走真实网络检查更新并退出
 8. **反转方向要翻三个字段**：`DeltaAxis` / `PointDelta` / `FixedPtDelta`。漏一个，读那个字段的应用就朝反方向滚。整数字段用整数存取器，浮点字段用浮点存取器。
 9. **帧源不能用 `NSScreen.main`** —— 对无窗口的菜单栏 App 返回 nil，会静默降级到定时器。要取指针所在的那块屏幕。
 10. **必须处理 `tapDisabledByTimeout`**，收到就 `CGEvent.tapEnable` 重开。不处理的话表现为「用一阵子突然失灵」。
-11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置所有老用户的**全部**配置。目前已覆盖 `ScrollSettings` / `ButtonBinding` / `AppRule` / `UpdateSettings` / `Preferences`；**`KeyCombo` 和 `MouseAction` 还没有，是个已装填的数据丢失陷阱**（改这两个类型会让老配置里的 `.keyStroke` 解码抛错 → 降级成 `.passthrough` → 被 `normalize()` 删掉 → 自动保存写盘，用户所有按键映射静默消失）。见 `docs/code-review-2026-08-31.md` F3。
+11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置老用户的配置。目前 `ScrollSettings` / `KeyCombo` / `MouseAction` / `ButtonBinding` / `AppRule` / `UpdateSettings` / `Preferences` 都已覆盖；`buttons` 还必须逐元素容错，未知动作只降为 `.passthrough` 并在 `normalize()` 时移除自身，损坏的一行不能拖掉其余映射。见 `docs/code-review-2026-08-31.md` F3。
 12. **动作不能在 tap 回调里同步执行**，一律 `DispatchQueue.main.async`。回调超时会被系统停用 tap。
 13. **不要在 tap 回调里查最前面的应用**（IPC 往返）。缓存 `frontmostBundleID`，靠 `didActivateApplicationNotification` 失效。
 14. **不要用全局键盘 tap 去探测键码**——那会捕获用户的真实输入。要验证按键是否有效，用「注入 + 读系统日志」（比如 `/usr/bin/log show --predicate 'subsystem == "com.apple.dock"'`）。注意**注入进程必须存活 ~400ms**，否则 WindowServer 不会处理队列——这会造成假阴性，我因此一次性误判了三个本来有效的按键。
@@ -163,7 +163,7 @@ XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有—�
 
 自检里「Mos 手感对齐」那组把 `33.6`、`2.70`、`1 - √(4.35/5.2)`、`0.23` 钉住了，参数被误改立刻失败。「动作实现完整性」那组保证 64 个动作都有实现、且没有两个动作发出完全相同的按键——不过后半句是在**键码解析之前**比较的，所以看不见多个 `.character` 动作在解析失败时塌到同一个键上。
 
-**修 bug 之后要补一条断言，别让同一个 bug 回来第二次。** 但**不要以为约束已经都被钉住了**：约束 1 / 2 / 3 / 4 / 13 有断言，约束 **6 / 7 / 8 / 9 / 10 / 12 零覆盖**，约束 5 的断言是同义反复的（`hasFallbackForEveryCharacter` 钉的是兜底表里已经有的那 9 个字符，等于「这张表等于它自己」），约束 11 只覆盖到 `Preferences` 层，约束 14 是流程约束、本质上无法断言。「滚动帧源生命周期」那组会驱动真实的 `DisplayLinkTicker`，但只钉生命周期一致性——**选哪块屏幕**（约束 9 本身）仍然没有断言，也刻意不断言「帧真的会来」，那要依赖有显示器，红在 SSH 上比没有这条更糟。
+**修 bug 之后要补一条断言，别让同一个 bug 回来第二次。** 但**不要以为约束已经都被钉住了**：约束 1 / 2 / 3 / 4 / 13 有断言，约束 **6 / 7 / 8 / 9 / 10 / 12 零覆盖**，约束 5 的断言是同义反复的（`hasFallbackForEveryCharacter` 钉的是兜底表里已经有的那 9 个字符，等于「这张表等于它自己」），约束 11 已覆盖到 `KeyCombo` / `MouseAction` 的结构变化和按键数组逐元素容错，约束 14 是流程约束、本质上无法断言。「滚动帧源生命周期」那组会驱动真实的 `DisplayLinkTicker`，但只钉生命周期一致性——**选哪块屏幕**（约束 9 本身）仍然没有断言，也刻意不断言「帧真的会来」，那要依赖有显示器，红在 SSH 上比没有这条更糟。
 
 约束 8 零覆盖直接导致了 `flipAxes` 用错存取器；约束 5 的同义反复直接导致了键码兜底返回一个真键。详见 `docs/code-review-2026-08-31.md` §4。
 

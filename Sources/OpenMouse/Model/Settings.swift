@@ -1,5 +1,31 @@
 import Foundation
 
+/// A dynamic key lets the decoder inspect an enum discriminator without rejecting names
+/// written by a newer build. Unknown actions are deliberately handled as data, not errors.
+private struct SettingsCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+/// Keeps an invalid element from making `JSONDecoder` discard an otherwise valid array.
+private struct LossyDecoded<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) throws {
+        value = try? Value(from: decoder)
+    }
+}
+
 // MARK: - Scroll
 
 /// Everything that shapes how a wheel notch turns into on-screen movement.
@@ -114,6 +140,19 @@ struct KeyCombo: Codable, Equatable, Hashable, Sendable {
         self.keyCode = keyCode
         self.modifiers = modifiers
     }
+
+    /// Decode each field independently so adding a field to a future shortcut does not turn
+    /// every shortcut written by an older build into `.passthrough`.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.init(keyCode: 0, modifiers: 0)
+            return
+        }
+        self.init(
+            keyCode: (try? c.decode(UInt16.self, forKey: .keyCode)) ?? 0,
+            modifiers: (try? c.decode(UInt64.self, forKey: .modifiers)) ?? 0
+        )
+    }
 }
 
 /// What a physical mouse button should do when pressed.
@@ -186,6 +225,53 @@ enum MouseAction: Codable, Equatable, Hashable, Sendable {
     /// down = App Exposé, left/right = switch desktop. A click without moving opens
     /// Mission Control. Mirrors the Logi Options+ gesture button.
     case gestureNavigation
+
+    private enum PayloadCodingKeys: String, CodingKey {
+        case _0
+        case path
+    }
+
+    /// Swift's synthesised enum decoder throws for an unknown discriminator or a changed
+    /// associated-value payload. A settings file can outlive the build that wrote it, so an
+    /// unsupported action becomes a no-op instead; `Preferences.normalize()` then removes only
+    /// that binding while leaving every action this build still understands intact.
+    init(from decoder: Decoder) throws {
+        guard let container = try? decoder.container(keyedBy: SettingsCodingKey.self),
+              container.allKeys.count == 1,
+              let actionKey = container.allKeys.first,
+              let kind = ActionKind(rawValue: actionKey.stringValue)
+        else {
+            self = .passthrough
+            return
+        }
+
+        switch kind {
+        case .keyStroke:
+            guard let payload = try? container.nestedContainer(
+                keyedBy: PayloadCodingKeys.self,
+                forKey: actionKey
+            ), let combo = try? payload.decode(KeyCombo.self, forKey: ._0) else {
+                self = .passthrough
+                return
+            }
+            self = .keyStroke(combo)
+
+        case .launchApp:
+            guard let payload = try? container.nestedContainer(
+                keyedBy: PayloadCodingKeys.self,
+                forKey: actionKey
+            ), let path = try? payload.decode(String.self, forKey: .path) else {
+                self = .passthrough
+                return
+            }
+            self = .launchApp(path: path)
+
+        default:
+            // ActionKind is already the single exhaustive, payload-free representation used
+            // by the picker. Reusing it here avoids a second 62-case decoder table drifting.
+            self = kind.makeAction(preserving: .passthrough)
+        }
+    }
 
     var isPassthrough: Bool { self == .passthrough }
 }
@@ -337,7 +423,11 @@ struct Preferences: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
         scroll = (try? container.decode(ScrollSettings.self, forKey: .scroll)) ?? .default
-        buttons = (try? container.decode([ButtonBinding].self, forKey: .buttons)) ?? []
+        let decodedButtons = try? container.decode(
+            [LossyDecoded<ButtonBinding>].self,
+            forKey: .buttons
+        )
+        buttons = decodedButtons?.compactMap(\.value) ?? []
         rules = (try? container.decode([AppRule].self, forKey: .rules)) ?? []
         update = (try? container.decode(UpdateSettings.self, forKey: .update)) ?? UpdateSettings()
     }
