@@ -9,10 +9,10 @@ enum AppActivationPolicy {
 
     static func enter() {
         count += 1
-        // `activate(ignoringOtherApps:)` is deprecated on recent macOS and can be ignored
-        // outright under cooperative activation; `activate()` is the supported form.
+        // Promotion and foreground activation are separate operations. The window controller
+        // waits for `didBecomeActive` before ordering its window, so it can never flash above the
+        // current app via `orderFrontRegardless` and then fall behind it.
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate()
     }
 
     static func leave() {
@@ -24,7 +24,6 @@ enum AppActivationPolicy {
         }
     }
 }
-
 
 /// One visible window owns one activation-policy reference. Repeated attempts to show the
 /// same window are idempotent, while distinct windows can still hold independent leases.

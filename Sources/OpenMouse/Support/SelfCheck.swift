@@ -1,3 +1,4 @@
+import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
@@ -164,6 +165,8 @@ enum SelfCheck {
         }
         group("应用元数据与生命周期") {
             activationLeaseIsIdempotent()
+            applicationMenuProvidesStandardShortcuts()
+            settingsWindowWaitsForActivationBeforeOrderingFront()
             versionFallbackIsHonest()
             statusItemPresentationTracksRuntimeState()
         }
@@ -1651,6 +1654,81 @@ enum SelfCheck {
             lease.leave()
             expect(leaves == 1 && !lease.isHeld, "关闭窗口只释放一次引用并恢复幂等空闲态")
         }
+    }
+
+    private static func applicationMenuProvidesStandardShortcuts() {
+        MainActor.assumeIsolated {
+            let menus = ApplicationMenuBuilder.make(
+                settingsTarget: nil,
+                settingsAction: Selector(("openSettings:"))
+            )
+            let items = recursiveMenuItems(in: menus.main)
+
+            func command(_ key: String, modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem? {
+                items.first {
+                    $0.keyEquivalent == key && $0.keyEquivalentModifierMask == modifiers
+                }
+            }
+
+            expect(
+                command("q")?.action == #selector(NSApplication.terminate(_:))
+                    && command("q")?.target === NSApp,
+                "应用主菜单提供 ⌘Q，并明确交给 NSApp 退出"
+            )
+            expect(
+                command("w")?.action == #selector(NSWindow.performClose(_:)),
+                "文件菜单提供 ⌘W，并关闭当前设置窗口"
+            )
+            expect(
+                ["x", "c", "v", "a"].allSatisfy { command($0) != nil }
+                    && command("z")?.action == Selector(("undo:"))
+                    && command("z", modifiers: [.command, .shift])?.action == Selector(("redo:")),
+                "剪切、复制、粘贴、全选、撤销与重做均由标准编辑菜单提供"
+            )
+            expect(
+                command(",")?.action == Selector(("openSettings:"))
+                    && command("m")?.action == #selector(NSWindow.performMiniaturize(_:)),
+                "应用菜单同时提供 ⌘, 设置和 ⌘M 最小化"
+            )
+        }
+    }
+
+    private static func recursiveMenuItems(in menu: NSMenu) -> [NSMenuItem] {
+        menu.items + menu.items.flatMap { item in
+            item.submenu.map(recursiveMenuItems(in:)) ?? []
+        }
+    }
+
+    private static func settingsWindowWaitsForActivationBeforeOrderingFront() {
+        var isActive = false
+        var steps: [String] = []
+        SettingsWindowPresentationSequence.perform(
+            isApplicationActive: { isActive },
+            promote: { steps.append("promote") },
+            orderFront: { steps.append("front") },
+            prepareWindow: { steps.append("prepare") },
+            waitForActivation: { steps.append("wait") },
+            requestActivation: { steps.append("request") }
+        )
+        expect(
+            steps == ["promote", "prepare", "wait", "request"],
+            "应用尚未激活时只用普通 orderFront 登记窗口，再监听并延后请求前台"
+        )
+
+        steps.removeAll()
+        isActive = true
+        SettingsWindowPresentationSequence.perform(
+            isApplicationActive: { isActive },
+            promote: { steps.append("promote") },
+            orderFront: { steps.append("front") },
+            prepareWindow: { steps.append("prepare") },
+            waitForActivation: { steps.append("wait") },
+            requestActivation: { steps.append("request") }
+        )
+        expect(
+            steps == ["promote", "front"],
+            "应用已激活时设置窗口只置顶一次，不使用 orderFrontRegardless 或延迟重复置顶"
+        )
     }
 
     private static func versionFallbackIsHonest() {

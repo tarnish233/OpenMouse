@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检 280 项 + 发布签名脚本检查 6 项，必须全过
+make test     # 内置自检 286 项 + 发布签名脚本检查 6 项，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用

@@ -4,6 +4,13 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: StatusItemController?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        ApplicationMenuBuilder.make(
+            settingsTarget: self,
+            settingsAction: #selector(openSettingsFromApplicationMenu(_:))
+        ).install(on: NSApp)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = StatusItemController(
             onOpenSettings: { [weak self] in self?.showSettings() }
@@ -43,6 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         showSettings()
         return true
+    }
+
+    @objc private func openSettingsFromApplicationMenu(_ sender: Any?) {
+        showSettings()
     }
 
     func showSettings() {

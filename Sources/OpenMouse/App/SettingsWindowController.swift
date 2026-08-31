@@ -1,6 +1,29 @@
 import AppKit
 import SwiftUI
 
+/// Keeps window ordering behind application activation. Ordering an inactive app's window with
+/// `orderFrontRegardless` makes it appear above the current app for one frame, then fall behind
+/// when WindowServer reconciles activation. Waiting instead gives one stable transition.
+enum SettingsWindowPresentationSequence {
+    static func perform(
+        isApplicationActive: () -> Bool,
+        promote: () -> Void,
+        orderFront: () -> Void,
+        prepareWindow: () -> Void,
+        waitForActivation: () -> Void,
+        requestActivation: () -> Void
+    ) {
+        promote()
+        if isApplicationActive() {
+            orderFront()
+        } else {
+            prepareWindow()
+            waitForActivation()
+            requestActivation()
+        }
+    }
+}
+
 /// Creates the settings window in code rather than as a SwiftUI `Settings` scene.
 /// `.fullSizeContentView` has to be present in the style mask at construction time for
 /// macOS 26 to draw the rounded, translucent window chrome — it cannot be added later.
@@ -11,6 +34,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         onEnter: { AppActivationPolicy.enter() },
         onLeave: { AppActivationPolicy.leave() }
     )
+    private var activationObserver: NSObjectProtocol?
+    private var activationRequestPending = false
 
     static func show(tab: SettingsTab? = nil) {
         if let tab {
@@ -52,24 +77,73 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     override func showWindow(_ sender: Any?) {
-        // Promote the activation policy *before* ordering the window front: a `.accessory`
-        // app cannot own the active window, so activating first would be a no-op.
-        activationLease.enter()
-        super.showWindow(sender)
-        guard let window else { return }
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
+        SettingsWindowPresentationSequence.perform(
+            isApplicationActive: { NSApp.isActive },
+            promote: { activationLease.enter() },
+            orderFront: { presentWindow() },
+            // A newly promoted LSUIElement app needs an ordered window before WindowServer will
+            // honor activation. Normal `orderFront` keeps it behind the current app; unlike
+            // `orderFrontRegardless`, it cannot flash above that app before activation.
+            prepareWindow: { window?.orderFront(nil) },
+            waitForActivation: { waitForApplicationActivation() },
+            requestActivation: { requestApplicationActivation() }
+        )
+    }
 
-        // The policy change lands on the next run-loop turn, and until it does the window
-        // can end up behind whatever was frontmost. Re-asserting once afterwards is cheap
-        // and makes "设置…" reliably bring the window forward.
-        Task { @MainActor in
-            NSApp.activate()
-            window.makeKeyAndOrderFront(nil)
+    private func requestApplicationActivation() {
+        guard !activationRequestPending else { return }
+        activationRequestPending = true
+
+        // `setActivationPolicy(.regular)` is reflected by WindowServer asynchronously. Requesting
+        // activation in the same stack frame can still be treated as an accessory-app request and
+        // ignored. One main-queue turn is enough; the window remains hidden during the wait.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.activationRequestPending = false
+                // Selecting a status-item command is an explicit user action but not a cooperative
+                // activation hand-off from the frontmost app, so the legacy spelling remains the
+                // reliable API for LSUIElement utilities on current macOS.
+                NSApp.activate(ignoringOtherApps: true)
+                if NSApp.isActive {
+                    self.presentWindow()
+                }
+            }
         }
     }
 
+    private func waitForApplicationActivation() {
+        guard activationObserver == nil else { return }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.presentWindow()
+            }
+        }
+
+        // Close the small race between the active-state check and observer installation.
+        if NSApp.isActive {
+            presentWindow()
+        }
+    }
+
+    private func presentWindow() {
+        activationRequestPending = false
+        stopWaitingForActivation()
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func stopWaitingForActivation() {
+        guard let activationObserver else { return }
+        NotificationCenter.default.removeObserver(activationObserver)
+        self.activationObserver = nil
+    }
+
     func windowWillClose(_ notification: Notification) {
+        stopWaitingForActivation()
         MouseEngine.shared.endButtonCapture()
         SettingsStore.shared.saveNow()
         activationLease.leave()
