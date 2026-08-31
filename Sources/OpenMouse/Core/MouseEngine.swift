@@ -19,7 +19,7 @@ final class MouseEngine {
     }
 
     private(set) var status: Status = .off
-    /// Bumped whenever macOS auto-disables the tap, so the UI can hint at it.
+    /// Bumped whenever macOS auto-disables either tap, so the UI can hint at it.
     private(set) var autoReenableCount = 0
     /// A physical press captured while recording: button number plus modifiers held.
     struct CapturedPress: Equatable, Sendable {
@@ -30,35 +30,59 @@ final class MouseEngine {
     private(set) var capturedPress: CapturedPress?
     private(set) var isCapturingButton = false
 
-    private let store = SettingsStore.shared
+    /// Nil only in self-checks, where touching the singleton would create a real preferences
+    /// file and subscribe to workspace notifications.
+    private let store: SettingsStore?
     private let router: EventRouter
-    private let tap: EventTapController
+    private let tap: any EventTapLifecycle
     /// A second tap, for pointer movement only, brought up while a gesture button is held.
     ///
     /// Kept separate from the main tap because it is the expensive one: `.mouseMoved` fires
     /// on every pixel of pointer travel, and a gesture button is held for maybe a second at a
     /// time. Subscribing permanently would mean paying that cost all day for a feature that
     /// is almost always idle.
-    private let motionTap: EventTapController
+    private let motionTap: any EventTapLifecycle
+    private let isTrusted: () -> Bool
     private var permissionPoll: Timer?
 
-    private init() {
+    private convenience init() {
+        let store = SettingsStore.shared
         let router = EventRouter(config: store.snapshot)
+        let tap = EventTapController(label: "main") { proxy, type, event in
+            router.handle(proxy: proxy, type: type, event: event)
+        }
+        let motionTap = EventTapController(label: "motion") { proxy, type, event in
+            router.handle(proxy: proxy, type: type, event: event)
+        }
+        self.init(
+            store: store,
+            router: router,
+            tap: tap,
+            motionTap: motionTap,
+            isTrusted: { AccessibilityPermission.isTrusted }
+        )
+    }
+
+    /// Internal seam for lifecycle self-checks. Production always enters through `shared`.
+    init(
+        store: SettingsStore?,
+        router: EventRouter,
+        tap: any EventTapLifecycle,
+        motionTap: any EventTapLifecycle,
+        isTrusted: @escaping () -> Bool
+    ) {
+        self.store = store
         self.router = router
-        tap = EventTapController(label: "main") { proxy, type, event in
-            router.handle(proxy: proxy, type: type, event: event)
+        self.tap = tap
+        self.motionTap = motionTap
+        self.isTrusted = isTrusted
+
+        let recover: (EventTapDisableReason) -> Void = { [weak self] reason in
+            MainActor.assumeIsolated { self?.handleAutoReenable(reason) }
         }
-        motionTap = EventTapController(label: "motion") { proxy, type, event in
-            router.handle(proxy: proxy, type: type, event: event)
-        }
-        tap.onAutoReenable = { [weak self] in
-            MainActor.assumeIsolated { self?.autoReenableCount += 1 }
-        }
-        // A tap the system disabled mid-hold will never see the button-up, so the gesture
-        // session has to be torn down explicitly or it stays armed forever.
-        motionTap.onAutoReenable = { [weak self] in
-            MainActor.assumeIsolated { self?.router.cancelGestures() }
-        }
+        tap.onAutoReenable = recover
+        motionTap.onAutoReenable = recover
+
         router.onGestureActivityChanged = { [weak self] isActive in
             guard isActive else {
                 // Tearing a run-loop source down underneath the callback that is running is
@@ -80,40 +104,68 @@ final class MouseEngine {
     func start() {
         observePreferences()
         apply()
-        startPermissionPollIfNeeded()
     }
 
     func stop() {
-        tap.stop()
-        motionTap.stop()
-        router.cancelGestures()
-        router.cancelInFlightScrolling()
+        teardownRuntime()
         status = .off
     }
 
-    /// Reconcile the tap with the current preferences.
+    /// Reconcile the tap with the current stored preferences.
     func apply() {
-        let prefs = store.preferences
+        guard let store else { return }
+        apply(preferences: store.preferences)
+    }
+
+    /// The actual state transition, exposed internally so self-checks can prove that every
+    /// non-running state converges both taps and all in-flight sessions to stopped/empty.
+    func apply(preferences prefs: Preferences, pollIfNeeded: Bool = true) {
         router.updateBindings(prefs.buttons)
 
         guard prefs.enabled || isCapturingButton else {
-            tap.stop()
-            motionTap.stop()
-            router.cancelGestures()
-            router.cancelInFlightScrolling()
+            teardownRuntime()
             status = .off
             return
         }
 
-        guard AccessibilityPermission.isTrusted else {
-            tap.stop()
+        guard isTrusted() else {
+            teardownRuntime()
             status = .needsPermission
-            startPermissionPollIfNeeded()
+            if pollIfNeeded { startPermissionPollIfNeeded() }
             return
         }
 
+        stopPermissionPoll()
+        // `EventTapController.start` replaces its run-loop source. Any swallowed down owned by
+        // the old tap can no longer be paired reliably, so clear secondary state first.
+        motionTap.stop()
+        router.cancelButtonSessions()
+        router.cancelInFlightScrolling()
+
         let mask = Self.eventMask(for: prefs, capturingButtons: isCapturingButton)
-        status = tap.start(mask: mask) ? .running : .failed
+        guard tap.start(mask: mask) else {
+            teardownRuntime()
+            status = .failed
+            return
+        }
+        status = .running
+    }
+
+    private func teardownRuntime() {
+        tap.stop()
+        motionTap.stop()
+        router.cancelButtonSessions()
+        router.cancelInFlightScrolling()
+        stopPermissionPoll()
+    }
+
+    private func handleAutoReenable(_ reason: EventTapDisableReason) {
+        _ = reason // The controller records the concrete reason in the structured log.
+        autoReenableCount += 1
+        // Either tap can be disabled while a gesture button is held. The matching up may have
+        // been missed, so preserving ownership would leave both the gesture and motion tap
+        // armed indefinitely.
+        router.cancelButtonSessions()
     }
 
     // MARK: Diagnostics
@@ -174,18 +226,19 @@ final class MouseEngine {
         | (1 << CGEventType.leftMouseDragged.rawValue)
         | (1 << CGEventType.rightMouseDragged.rawValue)
 
-    private func setMotionTapRunning(_ shouldRun: Bool) {
+    func setMotionTapRunning(_ shouldRun: Bool) {
         guard shouldRun else {
             motionTap.stop()
             return
         }
-        guard !motionTap.isRunning, AccessibilityPermission.isTrusted else { return }
-        motionTap.start(mask: Self.motionMask)
+        guard status == .running, !motionTap.isRunning, isTrusted() else { return }
+        _ = motionTap.start(mask: Self.motionMask)
     }
 
     // MARK: Observation
 
     private func observePreferences() {
+        guard let store else { return }
         withObservationTracking {
             _ = store.preferences
         } onChange: {
@@ -207,11 +260,15 @@ final class MouseEngine {
                     timer.invalidate()
                     return
                 }
-                guard AccessibilityPermission.isTrusted else { return }
-                timer.invalidate()
-                self.permissionPoll = nil
+                guard self.isTrusted() else { return }
+                self.stopPermissionPoll()
                 self.apply()
             }
         }
+    }
+
+    private func stopPermissionPoll() {
+        permissionPoll?.invalidate()
+        permissionPoll = nil
     }
 }

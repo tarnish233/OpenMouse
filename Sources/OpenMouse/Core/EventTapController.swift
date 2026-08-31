@@ -2,6 +2,22 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+enum EventTapDisableReason: String, Equatable {
+    case timeout
+    case userInput
+}
+
+/// The small lifecycle surface MouseEngine needs. Keeping it abstract lets the runtime
+/// convergence rules be exercised without creating an Accessibility-privileged event tap.
+protocol EventTapLifecycle: AnyObject {
+    var isRunning: Bool { get }
+    var onAutoReenable: ((EventTapDisableReason) -> Void)? { get set }
+
+    @discardableResult
+    func start(mask: CGEventMask) -> Bool
+    func stop()
+}
+
 /// Owns the lifetime of a `CGEventTap`, including the one failure mode everybody hits:
 /// macOS silently disables a tap whose callback takes too long, and the only signal is a
 /// `tapDisabledByTimeout` event that you must respond to by re-enabling yourself.
@@ -29,7 +45,7 @@ final class EventTapController {
 
     private(set) var isRunning = false
     /// Called when the system disables the tap so the app can surface it.
-    var onAutoReenable: (() -> Void)?
+    var onAutoReenable: ((EventTapDisableReason) -> Void)?
 
     init(label: String, handler: @escaping Handler) {
         self.label = label
@@ -94,23 +110,32 @@ final class EventTapController {
         if wasRunning { Trace.tapStopped(kind: label) }
     }
 
-    private func dispatch(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    /// Handle both system disable reasons through one observable recovery path. Exposed
+    /// internally so self-checks can cover the callbacks without creating a privileged tap.
+    @discardableResult
+    func handleDisableEvent(_ type: CGEventType) -> Bool {
+        let reason: EventTapDisableReason
         switch type {
         case .tapDisabledByTimeout:
-            // Our callback overran the deadline. Turn the tap back on, otherwise the app
-            // looks like it randomly stopped working.
-            if let port = machPort {
-                CGEvent.tapEnable(tap: port, enable: true)
-            }
-            onAutoReenable?()
-            return nil
+            reason = .timeout
         case .tapDisabledByUserInput:
-            if let port = machPort {
-                CGEvent.tapEnable(tap: port, enable: true)
-            }
-            return nil
+            reason = .userInput
         default:
-            return handler(proxy, type, event)
+            return false
         }
+
+        if let port = machPort {
+            CGEvent.tapEnable(tap: port, enable: true)
+        }
+        Trace.tapAutoReenabled(kind: label, reason: reason.rawValue)
+        onAutoReenable?(reason)
+        return true
+    }
+
+    private func dispatch(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if handleDisableEvent(type) { return nil }
+        return handler(proxy, type, event)
     }
 }
+
+extension EventTapController: EventTapLifecycle {}

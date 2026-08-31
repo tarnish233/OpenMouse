@@ -14,7 +14,7 @@
 | 1 | F1、`cancel()` 漏重置运行态、F5、C3 | **已修复并核实**（自检 136 → 143 项） |
 | 2 | F3 | **已修复并核实**（自检 143 → 145 项） |
 | 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | **已复核并完成**（F4 核心结论驳回；自检 145 → 152 项） |
-| 4 | F7、F9、F10、F11 | 未开始 |
+| 4 | F7、F9、F10、F11 | **已修复并核实**（自检 152 → 183 项） |
 | 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | 未开始 |
 
 第 1 批的核实方式：读代码确认锁序无反转（animator 锁 → ticker 锁，三个调用点方向一致）、真机 26 段滑行放大稳定在 9.6x 且无投递失败、空闲 CPU 0.0%。遗留的三点小问题记在 §6 末尾。
@@ -23,13 +23,16 @@
 
 第 3 批复核发现 F4 的核心判定错误：Apple 将 `PointDelta` 定义为整数，实际构造的 `CGEvent` 也会把写入的 `0.5` 量化为 `0`；Mos 使用 double 存取器只是发生隐式转换，不能证明字段能保存小数。该条按真实字段类型收口并覆盖三字段翻转，其余 F2、断言和三处漂移均已修复。
 
+第 4 批把「按下时的所有权」收成 `buttonClaims`，mouse-up 不再重新解析可变配置；`MouseEngine` 的 off / needsPermission / failed / stop 统一走 teardown，同时停止两条 tap、滚动、按键会话和权限轮询；两种系统禁用原因都经过同一恢复钩子；连续设备平滑、透传和无目标回退共用一份反向策略。release 构建通过，`make test` 183/183。
+
 `CLAUDE.md` 里 §4 指出的两句假话已经改掉了（约束 11 的覆盖范围、测试一节声称的断言覆盖）。
 
 ## 怎么读这份文档
 
-- **判定**一栏只有两种值：
+- **判定**一栏的原始值有两种：
   - `已确认` —— 我直接读源码确认了代码事实与推导链条。
   - `待确认` —— 逻辑成立，但触发它需要一个尚未证明会真实发生的输入。修之前先判断值不值得。
+  - 已处理条目会改成 `已修复` 或写明复核后驳回原结论。
 - 每条都给了**修复要建立的性质**而不是具体补丁。挑实现方式是修的人的事，但那条性质必须成立。
 - **应补断言**一栏不是可选项。项目的约定是「修 bug 之后要补一条断言」，而 §4 说明了为什么这次特别重要。
 - 编号 `F1`–`F15` 是已验证的缺陷，`C1`–`C9` 是未逐条验证的候选项。
@@ -46,10 +49,10 @@
 | F2 | `Core/KeyboardLayout.swift:31` | 约束 5：键码兜底返回 `0`（一个真键），发出另一个快捷键 | 已确认 |
 | F3 | `Model/Settings.swift:118` | 约束 11：`KeyCombo` / `MouseAction` 没有手写 `init(from:)`，会静默清空用户映射 | 已确认 |
 | **P2 —— 功能性缺陷** | | | |
-| F7 | `Core/EventRouter.swift:320` | 松开修饰键再松开按键，手势会话被搁死，motion tap 永久订阅 | 已确认 |
-| F9 | `Core/MouseEngine.swift:109` | 未授权分支不拆 motion tap，`isRunning` 变陈旧真，重新授权后手势永久失效 | 已确认 |
-| F10 | `Core/MouseEngine.swift:59` | 手势拆除钩子挂在了不带按键事件的那个 tap 上 | 已确认 |
-| F11 | `Core/EventRouter.swift:129` | 平滑分支无视 `reverseContinuousDevices`，触控板被违愿反向 | 已确认 |
+| F7 | `Core/EventRouter.swift:320` | 松开修饰键再松开按键，手势会话被搁死，motion tap 永久订阅 | **已修复（第 4 批）** |
+| F9 | `Core/MouseEngine.swift:109` | 未授权分支不拆 motion tap，`isRunning` 变陈旧真，重新授权后手势永久失效 | **已修复（第 4 批）** |
+| F10 | `Core/MouseEngine.swift:59` | 手势拆除钩子挂在了不带按键事件的那个 tap 上 | **已修复（第 4 批）** |
+| F11 | `Core/EventRouter.swift:129` | 平滑分支无视 `reverseContinuousDevices`，触控板被违愿反向 | **已修复（第 4 批）** |
 | F8 | `Model/ActionKind.swift:299` | 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母 | 已确认 |
 | F6 | `Core/MouseGestureRecognizer.swift:106` | 10–40px 与所有斜划既不触发方向也不算单击，按键表现为坏了 | 已确认 |
 | F12 | `Model/Settings.swift:381` | 应用规则按最前应用取，事件按 `postToPid` 投——两者不同一时规则用错进程 | 已确认 |
@@ -230,7 +233,7 @@ let built = build() ?? [:]
 
 ## 3. P2：功能性缺陷
 
-### F7 —— 按键松开时重新解析绑定，手势会话被搁死（已确认）
+### F7 —— 按键松开时重新解析绑定，手势会话被搁死（已确认；第 4 批已修复）
 
 **位置**：`Core/EventRouter.swift:320`（`handleButton`）、`:317`、`:354-355`（被违背的注释）、`Model/Settings.swift:230-236`（`resolve`）
 
@@ -254,7 +257,7 @@ let built = build() ?? [:]
 
 **应补断言**：模拟「带修饰键按下 → 无修饰键松开」，断言会话已拆除且 up 被吞掉。
 
-### F9 —— 未授权分支不拆 motion tap，`isRunning` 变成陈旧的真（已确认）
+### F9 —— 未授权分支不拆 motion tap，`isRunning` 变成陈旧的真（已确认；第 4 批已修复）
 
 **位置**：`Core/MouseEngine.swift:108-113`（`needsPermission` 分支）、对照 `:99-106`（`disabled` 分支）、`:182`（`setMotionTapRunning`）、`Core/EventTapController.swift:93`
 
@@ -277,7 +280,9 @@ let built = build() ?? [:]
 
 **应补断言**：模拟 `needsPermission → active` 转换，断言 motion tap 能被重新启动。
 
-### F10 —— 手势拆除钩子挂在了不带按键事件的那个 tap 上（已确认）
+**第 4 批修复结果**：所有非运行态统一进入 `teardownRuntime()`，同时停止主 tap、motion tap、按键会话、滚动和权限轮询；权限检查可注入，自检覆盖 `running → needsPermission → running` 并确认 motion tap 能再次启动。
+
+### F10 —— 手势拆除钩子挂在了不带按键事件的那个 tap 上（已确认；第 4 批已修复）
 
 **位置**：`Core/MouseEngine.swift:54`、`:57-58`（注释）、`:59`、`:160`（`eventMask`）、`:171`（`motionMask`）、`Core/EventTapController.swift:107`
 
@@ -298,9 +303,11 @@ let built = build() ?? [:]
 
 > 任何一条 tap 停用/重启路径都会触发手势会话拆除，且拆除挂在真正持有按键事件的那个 tap 上；两种停用原因都产生可观测的诊断。
 
-**应补断言**：约束 10 现在零覆盖。至少断言 `.tapDisabledByTimeout` 和 `.tapDisabledByUserInput` 两条路径都会调到拆除钩子。
+**应补断言（审查时）**：约束 10 当时零覆盖。至少断言 `.tapDisabledByTimeout` 和 `.tapDisabledByUserInput` 两条路径都会调到拆除钩子。
 
-### F11 —— 平滑分支无视 `reverseContinuousDevices`（已确认）
+**第 4 批修复结果**：`EventTapController.handleDisableEvent` 统一处理两种原因、记录 reason 并触发同一 hook；主 tap 与 motion tap 都接到 `MouseEngine.handleAutoReenable`，统一计数并拆除按键/手势会话。自检分别驱动两种原因和两条 tap。
+
+### F11 —— 平滑分支无视 `reverseContinuousDevices`（已确认；第 4 批已修复）
 
 **位置**：`Core/EventRouter.swift:129-130`（平滑分支）、`:116`（`wantsReverse`）、对照 `:140-146`（非平滑分支）、`:125-128`（投不出去的兜底）、`Model/Settings.swift:20`、`:40-42`
 
@@ -317,6 +324,8 @@ let built = build() ?? [:]
 > 「是否反向」由单一判定产出，平滑与非平滑、可投递与不可投递四条路径全部消费同一个结果。
 
 **应补断言**：把四条路径 × 反向开关的组合钉住，尤其是上面那个「反向垂直开 + 反向触控板关」的组合。
+
+**第 4 批修复结果**：`ContinuousScrollPolicy` 一次产出平滑与两轴反向决定；平滑投递、非平滑透传、无目标回退都消费这份策略。自检覆盖闸门开关、平滑开关和无目标回退的方向。
 
 ### F8 —— 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母（已确认）
 
@@ -480,13 +489,13 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 | 7 | 合成滚动设 `IsContinuous = 1` | **无** |
 | 8 | 反向翻三个字段 | 有（第 3 批按 Apple 的真实字段类型覆盖） |
 | 9 | 帧源不用 `NSScreen.main` | **无** |
-| 10 | 处理 `tapDisabledByTimeout` | **无** |
+| 10 | 处理两种 tap disable 原因并拆会话 | 有（第 4 批覆盖 timeout / userInput 与主、motion tap 的统一恢复钩子） |
 | 11 | 手写 `init(from:)` | 有（第 2 批覆盖子结构和逐元素容错） |
 | 12 | 动作不在 tap 回调里同步执行 | **无** |
 | 13 | 不在 tap 回调里查最前应用 | 有 |
 | 14 | 不用键盘 tap 探测键码 | **无**（这条本质上无法断言，是流程约束——文档应当把它标出来） |
 
-审查当时共有七条零覆盖；第 2、3 批已补上约束 5 / 6 / 8 / 11。F2 和 F3 的覆盖缺口判断成立；F4 则在复核时发现报告对字段类型的前提判断错误，详见上面的修正记录。
+审查当时共有七条零覆盖；第 2、3 批补上约束 5 / 6 / 8 / 11，第 4 批补上约束 10，并另行覆盖按键 claim、权限收敛和连续设备反向的四条路径。F2 和 F3 的覆盖缺口判断成立；F4 则在复核时发现报告对字段类型的前提判断错误，详见上面的修正记录。
 
 ### 4.2 两条现有断言是同义反复的（第 3 批已修正）
 
@@ -578,8 +587,8 @@ F3。它现在是已装填状态，下一个碰 `KeyCombo` / `MouseAction` 的�
 **第 3 批 —— 已破的约束（P1）**
 F4（连注释一起改）、F2（含 `:70` 的失败缓存）。同时处理 §4.3 那三处潜伏漂移，以及 §4.2 两条同义反复的断言——**改完那两条断言会立刻失败，那是正确的**，让它们指出真实缺口。
 
-**第 4 批 —— 事件路由与生命周期（P2）**
-F7、F9、F10、F11。这四条互相有关联（都围绕 tap 生命周期与手势会话），一起改比分开改省事。
+**第 4 批 —— 事件路由与生命周期（P2，已完成）**
+F7、F9、F10、F11 已统一收口：button claim 决定释放、引擎 teardown 收敛所有非运行态、两种 tap disable 原因共用恢复钩子、连续设备共用反向策略。自检 152 → 183 项。
 
 **第 5 批 —— 其余（P2）**
 F8、F6、F12、F14、F13、F15，以及 C1、C2、C4。

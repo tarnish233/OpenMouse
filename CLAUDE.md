@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检（143 项，必须全过）
+make test     # 内置自检（183 项，必须全过）
 make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -34,7 +34,7 @@ make test                                        # 等价于 swift run -c debug 
 
 返回码即结果，失败会打出哪一条断言挂了。
 
-**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 15 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
+**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 16 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
 
 ### 调试
 
@@ -71,7 +71,7 @@ OpenMouse --check-update owner/repo   # 走真实网络检查更新并退出
 7. **合成滚动事件必须设 `IsContinuous = 1`**，否则应用把它量化回整行，插值白做。
 8. **反转方向要翻三个字段**：`DeltaAxis` / `PointDelta` / `FixedPtDelta`。漏一个，读那个字段的应用就朝反方向滚。Apple 定义前两个为整数、`FixedPtDelta` 为 16.16 定点值；字段和存取器统一由 `ScrollEventFields` 定义，不要在调用点重写。
 9. **帧源不能用 `NSScreen.main`** —— 对无窗口的菜单栏 App 返回 nil，会静默降级到定时器。要取指针所在的那块屏幕。
-10. **必须处理 `tapDisabledByTimeout`**，收到就 `CGEvent.tapEnable` 重开。不处理的话表现为「用一阵子突然失灵」。
+10. **必须同时处理 `tapDisabledByTimeout` 和 `tapDisabledByUserInput`**：收到就 `CGEvent.tapEnable` 重开、写诊断，并经过同一个恢复钩子清掉可能丢失抬起的按键/手势会话。只处理其中一条会留下永久开启的 motion tap 或下一次移动误触发。
 11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置老用户的配置。目前 `ScrollSettings` / `KeyCombo` / `MouseAction` / `ButtonBinding` / `AppRule` / `UpdateSettings` / `Preferences` 都已覆盖；`buttons` 还必须逐元素容错，未知动作只降为 `.passthrough` 并在 `normalize()` 时移除自身，损坏的一行不能拖掉其余映射。见 `docs/code-review-2026-08-31.md` F3。
 12. **动作不能在 tap 回调里同步执行**，一律 `DispatchQueue.main.async`。回调超时会被系统停用 tap。
 13. **不要在 tap 回调里查最前面的应用**（IPC 往返）。缓存 `frontmostBundleID`，靠 `didActivateApplicationNotification` 失效。
@@ -148,13 +148,15 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 阈值：40px 才算划动，某轴要比另一轴多 1.2 倍（避免斜划乱猜），≤10px 算原地单击。**一次按住只触发一个动作**，否则一次长划反复越过阈值会跳三个桌面。横向刻意反向（左划 = 切到右边的桌面），与触控板同向。
 
+**被吞掉的按下拥有它的抬起。** `EventRouter` 在 mouse-down 时记录 claim；mouse-up 只按这份会话状态收尾，不能重新解析当时的修饰键、绑定或前台应用。任何 tap 重建、权限丢失、引擎关闭与自动恢复都必须经统一 teardown 清掉 claim、gesture session、motion tap 和权限轮询。
+
 ## 约定
 
 - `.swiftLanguageMode(.v5)`。事件 tap 天生是 C 函数指针回调 + `Unmanaged`，Swift 6 的严格隔离会让这层充满仪式性样板。不要为了「现代化」把它切到 v6。
 - 跨线程共享状态统一走 `Locked`（`OSAllocatedUnfairLock`）：配置快照、动画状态、滤波器、计数器。
 - 界面文案全部集中在 `Strings.swift`，目前只有中文。
 - 设置界面遵循 `macos-settings-ui` skill 的写法（`NSWindowController` + `.fullSizeContentView` + 透明 `Form`）。
-- 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询。
+- 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询；任何离开运行态的分支都通过同一个 teardown 同时停止主 tap、motion tap、会话与轮询。
 - 注释写「为什么」，尤其是那些看起来可以简化但不能简化的地方——这个项目里大部分坑都长得像多余的代码。
 
 ## 测试为什么是 `--self-check`
@@ -163,9 +165,9 @@ XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有—�
 
 自检里「Mos 手感对齐」那组把 `33.6`、`2.70`、`1 - √(4.35/5.2)`、`0.23` 钉住了，参数被误改立刻失败。「动作实现完整性」那组保证 64 个动作都有实现，并在 `.character` 经过当前布局解析成真实键码之后检查重复，能抓到多个动作塌到同一个键上的问题。
 
-**修 bug 之后要补一条断言，别让同一个 bug 回来第二次。** 但**不要以为约束已经都被钉住了**：约束 1 / 2 / 3 / 4 / 5 / 6 / 8 / 11 / 13 有断言，约束 **7 / 9 / 10 / 12 零覆盖**；约束 14 是流程约束、本质上无法断言。「滚动帧源生命周期」那组会驱动真实的 `DisplayLinkTicker`，但只钉生命周期一致性——**选哪块屏幕**（约束 9 本身）仍然没有断言，也刻意不断言「帧真的会来」，那要依赖有显示器，红在 SSH 上比没有这条更糟。
+**修 bug 之后要补一条断言，别让同一个 bug 回来第二次。** 但**不要以为约束已经都被钉住了**：约束 1 / 2 / 3 / 4 / 5 / 6 / 8 / 11 / 13 有断言，约束 **7 / 9 / 12 零覆盖**；约束 10 已覆盖两种系统禁用原因及统一会话拆除，约束 14 是流程约束、本质上无法断言。「滚动帧源生命周期」那组会驱动真实的 `DisplayLinkTicker`，但只钉生命周期一致性——**选哪块屏幕**（约束 9 本身）仍然没有断言，也刻意不断言「帧真的会来」，那要依赖有显示器，红在 SSH 上比没有这条更糟。
 
-约束 5 原来的同义反复断言曾漏掉 15 个动作字符；第 3 批已改为从生产动作表反向枚举。审查报告 F4 把 `PointDelta` 误判成浮点字段，复核时依据 Apple 文档和真实 `CGEvent` 行为驳回了该结论，但仍把三个字段及其存取器收口并补了翻转断言。详见 `docs/code-review-2026-08-31.md` §4。
+约束 5 原来的同义反复断言曾漏掉 15 个动作字符；第 3 批已改为从生产动作表反向枚举。审查报告 F4 把 `PointDelta` 误判成浮点字段，复核时依据 Apple 文档和真实 `CGEvent` 行为驳回了该结论，但仍把三个字段及其存取器收口并补了翻转断言。第 4 批把按键 claim、两条 tap 禁用路径、权限状态收敛和连续设备反向统一为可测试的必经路径。详见 `docs/code-review-2026-08-31.md` §4。
 
 ## 参考实现
 

@@ -15,6 +15,30 @@ enum SelfCheck {
     private static var checks = 0
     private static var currentGroup = ""
 
+    private final class ProbeEventTap: EventTapLifecycle {
+        private(set) var isRunning = false
+        var onAutoReenable: ((EventTapDisableReason) -> Void)?
+        var startSucceeds = true
+        private(set) var startMasks: [CGEventMask] = []
+        private(set) var stopCount = 0
+
+        @discardableResult
+        func start(mask: CGEventMask) -> Bool {
+            startMasks.append(mask)
+            isRunning = startSucceeds
+            return startSucceeds
+        }
+
+        func stop() {
+            stopCount += 1
+            isRunning = false
+        }
+
+        func simulateDisable(_ reason: EventTapDisableReason) {
+            onAutoReenable?(reason)
+        }
+    }
+
     static func run() -> Bool {
         failures = []
         checks = 0
@@ -47,6 +71,7 @@ enum SelfCheck {
             modifierVariant()
             inactiveDetection()
             motionMaskCoversPlainMovement()
+            buttonReleaseUsesPressClaim()
         }
         group("手势导航") {
             commitsDominantAxis()
@@ -101,7 +126,12 @@ enum SelfCheck {
             tapsWhereTargetIsAnnotated()
             refusesUndeliverableTarget()
             reversesAllScrollFields()
+            continuousDevicePolicyIsConsistent()
             auxiliaryEventsCarrySyntheticTag()
+        }
+        group("事件监听生命周期") {
+            eventTapDisableReasonsAreObservable()
+            engineConvergesAcrossPermissionChanges()
         }
         group("系统快捷键") {
             windowManagementStrokesCarryFn()
@@ -626,6 +656,69 @@ enum SelfCheck {
         )
     }
 
+    /// A down swallowed under one binding owns its up even if modifiers, bindings and the
+    /// active app all change while the button is held.
+    private static func buttonReleaseUsesPressClaim() {
+        let modifier = CGEventFlags.maskCommand.rawValue
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var fired: [MouseAction] = []
+        let router = EventRouter(config: snapshot) { fired.append($0) }
+        router.updateBindings([
+            ButtonBinding(button: 4, modifiers: modifier, action: .gestureNavigation)
+        ])
+        var activity: [Bool] = []
+        router.onGestureActivityChanged = { activity.append($0) }
+
+        guard let down = mouseButtonEvent(
+            type: .otherMouseDown,
+            button: 4,
+            modifiers: modifier,
+            location: CGPoint(x: 10, y: 20)
+        ), let up = mouseButtonEvent(
+            type: .otherMouseUp,
+            button: 4,
+            modifiers: 0,
+            location: CGPoint(x: 10, y: 20)
+        ) else {
+            expect(false, "可构造侧键按下与抬起事件")
+            return
+        }
+
+        expect(router.handleButton(type: .otherMouseDown, event: down) == nil, "有修饰键的侧键按下被接管")
+        expect(
+            router.activeButtonClaimCount == 1 && router.activeGestureSessionCount == 1,
+            "按下后记录释放所有权与手势会话"
+        )
+
+        // Exercise every mutable input that used to be re-resolved on mouse-up.
+        snapshot.value = .inactive
+        router.updateBindings([])
+        expect(router.handleButton(type: .otherMouseUp, event: up) == nil, "配置变化后的裸抬起仍被吞掉")
+        expect(
+            router.activeButtonClaimCount == 0 && router.activeGestureSessionCount == 0,
+            "抬起按按下时的 claim 收尾，不遗留会话"
+        )
+        expect(activity == [true, false], "手势活动状态成对开始与结束")
+        expect(fired == [.missionControl], "静止手势仍按按下时动作解释为单击")
+    }
+
+    private static func mouseButtonEvent(
+        type: CGEventType,
+        button: Int,
+        modifiers: UInt64,
+        location: CGPoint
+    ) -> CGEvent? {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: location,
+            mouseButton: .center
+        ) else { return nil }
+        event.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button))
+        event.flags = CGEventFlags(rawValue: modifiers)
+        return event
+    }
+
     // MARK: Gesture navigation
 
     /// Real mice were observed delivering `.otherMouseDragged` with both delta fields at
@@ -1027,6 +1120,165 @@ enum SelfCheck {
             synthetic.point == 0 && synthetic.fixedPoint == 0.5,
             "合成亚像素滚动写入整数 PointDelta，并由 FixedPtDelta 保留小数"
         )
+    }
+
+    /// Continuous-device smoothing and reversal must use one policy in every branch,
+    /// including the target-unavailable fallback where the original event is passed through.
+    private static func continuousDevicePolicyIsConsistent() {
+        var settings = ScrollSettings.default
+        settings.affectContinuousDevices = true
+        settings.smoothingEnabled = true
+        settings.reverseVertical = true
+        settings.reverseHorizontal = true
+        settings.reverseContinuousDevices = false
+
+        let gatedOff = EventRouter.continuousPolicy(for: settings)
+        expect(gatedOff.smooth, "连续设备可独立启用平滑")
+        expect(!gatedOff.reversesAnyAxis, "未开启连续设备反向时，普通反向开关不会波及触控板")
+        let unchanged = gatedOff.adjusted(vertical: 3, horizontal: -4)
+        expect(unchanged.vertical == 3 && unchanged.horizontal == -4, "反向门控关闭时平滑输入保持原方向")
+
+        settings.reverseContinuousDevices = true
+        let gatedOn = EventRouter.continuousPolicy(for: settings)
+        let reversed = gatedOn.adjusted(vertical: 3, horizontal: -4)
+        expect(
+            reversed.vertical == -3 && reversed.horizontal == 4,
+            "反向门控开启时，平滑连续输入按轴翻转"
+        )
+
+        settings.smoothingEnabled = false
+        let passthrough = EventRouter.continuousPolicy(for: settings)
+        expect(!passthrough.smooth && passthrough.reversesAnyAxis, "不平滑的连续输入仍沿用同一反向策略")
+
+        let router = EventRouter(config: Locked(.inactive))
+        settings.smoothingEnabled = true
+        settings.reverseHorizontal = false
+
+        guard let protected = continuousEvent(fixedVertical: 5.25),
+              let reversedFallback = continuousEvent(fixedVertical: 5.25) else {
+            expect(false, "可构造连续滚动事件")
+            return
+        }
+
+        settings.reverseContinuousDevices = false
+        expect(router.handleContinuous(protected, settings: settings) != nil, "无目标的连续事件不会被吞掉")
+        expectClose(
+            ScrollEventFields.vertical.read(from: protected).fixedPoint,
+            5.25,
+            "无目标回退在门控关闭时保持原方向"
+        )
+
+        settings.reverseContinuousDevices = true
+        expect(router.handleContinuous(reversedFallback, settings: settings) != nil, "反向后的无目标连续事件仍被透传")
+        expectClose(
+            ScrollEventFields.vertical.read(from: reversedFallback).fixedPoint,
+            -5.25,
+            "无目标回退也遵守连续设备反向门控"
+        )
+    }
+
+    private static func continuousEvent(fixedVertical: Double) -> CGEvent? {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: 5,
+            wheel2: 0,
+            wheel3: 0
+        ) else { return nil }
+        event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: fixedVertical)
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: 0)
+        return event
+    }
+
+    /// Both disable signals are recovery events; handling only timeout leaves the common
+    /// user-input disable path silent and keeps stale ownership alive.
+    private static func eventTapDisableReasonsAreObservable() {
+        let controller = EventTapController(label: "self-check") { _, _, event in
+            Unmanaged.passUnretained(event)
+        }
+        var reasons: [EventTapDisableReason] = []
+        controller.onAutoReenable = { reasons.append($0) }
+
+        expect(controller.handleDisableEvent(.tapDisabledByTimeout), "超时禁用会走自动恢复路径")
+        expect(controller.handleDisableEvent(.tapDisabledByUserInput), "用户输入禁用也走自动恢复路径")
+        expect(!controller.handleDisableEvent(.scrollWheel), "普通事件不会误触发自动恢复")
+        expect(reasons == [.timeout, .userInput], "两种禁用原因都通知引擎并保留顺序")
+    }
+
+    /// Permission loss and tap replacement must converge all runtime pieces, then permission
+    /// recovery must restart the main tap and still allow gesture motion capture.
+    private static func engineConvergesAcrossPermissionChanges() {
+        MainActor.assumeIsolated {
+            var trusted = true
+            let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+            let router = EventRouter(config: snapshot, runAction: { _ in })
+            let mainTap = ProbeEventTap()
+            let motionTap = ProbeEventTap()
+            let engine = MouseEngine(
+                store: nil,
+                router: router,
+                tap: mainTap,
+                motionTap: motionTap,
+                isTrusted: { trusted }
+            )
+            var prefs = Preferences()
+            prefs.buttons = [ButtonBinding(button: 4, action: .gestureNavigation)]
+
+            engine.apply(preferences: prefs, pollIfNeeded: false)
+            expect(engine.status == .running && mainTap.isRunning, "权限可用时主监听启动")
+
+            guard let firstDown = mouseButtonEvent(
+                type: .otherMouseDown,
+                button: 4,
+                modifiers: 0,
+                location: .zero
+            ) else {
+                expect(false, "可构造权限切换测试的侧键事件")
+                return
+            }
+            _ = router.handleButton(type: .otherMouseDown, event: firstDown)
+            expect(motionTap.isRunning, "手势按下时按需启动移动监听")
+
+            trusted = false
+            engine.apply(preferences: prefs, pollIfNeeded: false)
+            expect(engine.status == .needsPermission, "权限丢失后状态切到需要授权")
+            expect(!mainTap.isRunning && !motionTap.isRunning, "权限丢失会停止主监听与移动监听")
+            expect(
+                router.activeButtonClaimCount == 0 && router.activeGestureSessionCount == 0,
+                "权限丢失会清空被吞按键与手势会话"
+            )
+
+            trusted = true
+            engine.apply(preferences: prefs, pollIfNeeded: false)
+            expect(engine.status == .running && mainTap.startMasks.count == 2, "权限恢复后主监听重新启动")
+            engine.setMotionTapRunning(true)
+            expect(motionTap.isRunning, "恢复后移动监听仍可按需启动")
+
+            guard let secondDown = mouseButtonEvent(
+                type: .otherMouseDown,
+                button: 4,
+                modifiers: 0,
+                location: .zero
+            ) else {
+                expect(false, "可构造自动恢复测试的侧键事件")
+                return
+            }
+            _ = router.handleButton(type: .otherMouseDown, event: secondDown)
+            expect(router.activeButtonClaimCount == 1, "自动恢复前存在被吞按键所有权")
+            mainTap.simulateDisable(.userInput)
+            expect(engine.autoReenableCount == 1, "主监听用户输入禁用会计入自动恢复")
+            expect(
+                router.activeButtonClaimCount == 0 && router.activeGestureSessionCount == 0,
+                "主监听自动恢复会清空可能丢失抬起的会话"
+            )
+            motionTap.simulateDisable(.timeout)
+            expect(engine.autoReenableCount == 2, "移动监听超时恢复也走同一计数与收尾路径")
+
+            engine.stop()
+            expect(engine.status == .off && !mainTap.isRunning && !motionTap.isRunning, "显式停止收敛为完全关闭")
+        }
     }
 
     private static func auxiliaryEventsCarrySyntheticTag() {

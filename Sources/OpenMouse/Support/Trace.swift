@@ -27,6 +27,10 @@ enum Trace {
         tap.notice("tap \(kind, privacy: .public) stop")
     }
 
+    static func tapAutoReenabled(kind: String, reason: String) {
+        tap.notice("tap \(kind, privacy: .public) auto-reenabled reason=\(reason, privacy: .public)")
+    }
+
     static func buttonSeen(button: Int, isDown: Bool, action: String) {
         gesture.notice("button \(button) \(isDown ? "down" : "up", privacy: .public) → \(action, privacy: .public)")
     }

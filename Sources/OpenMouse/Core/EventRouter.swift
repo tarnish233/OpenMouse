@@ -14,7 +14,7 @@ final class EventRouter {
     let stats = Locked(EngineStats())
 
     private let animator: ScrollAnimator
-    private let actions = ActionRunner()
+    private let runAction: (MouseAction) -> Void
 
     private let config: Locked<ResolvedConfig>
     private let bindings = Locked<[ButtonBinding]>([])
@@ -24,6 +24,15 @@ final class EventRouter {
 
     /// Timestamp of the last wheel notch, for the flywheel acceleration curve.
     private var lastNotchTime: CFTimeInterval = 0
+    private enum ButtonClaim {
+        case capture
+        case action(MouseAction)
+    }
+
+    /// Every swallowed down is recorded until its matching up arrives. Release handling must
+    /// consult this session state, not re-resolve mutable bindings/modifiers and risk exposing a
+    /// bare mouse-up to the application underneath.
+    private var buttonClaims: [Int: ButtonClaim] = [:]
     /// Active gesture-navigation holds, keyed by button number. A dictionary rather than a
     /// single slot because two buttons can be bound to gestures and held at once.
     private var gestureSessions: [Int: MouseGestureRecognizer] = [:]
@@ -35,8 +44,12 @@ final class EventRouter {
     /// burn CPU for a feature that is idle almost all of the time.
     var onGestureActivityChanged: ((Bool) -> Void)?
 
-    init(config: Locked<ResolvedConfig>) {
+    init(
+        config: Locked<ResolvedConfig>,
+        runAction: @escaping (MouseAction) -> Void = { ActionRunner().runAsync($0) }
+    ) {
         self.config = config
+        self.runAction = runAction
         animator = ScrollAnimator(stats: stats)
     }
 
@@ -59,13 +72,17 @@ final class EventRouter {
         animator.cancel()
     }
 
-    /// Drop any in-progress gesture. Called when the system disables a tap mid-hold, which
-    /// would otherwise leave a session armed with no button-up coming to close it.
-    func cancelGestures() {
+    /// Drop all swallowed-button ownership. Called when a tap is stopped or disabled mid-hold,
+    /// because no matching button-up can be trusted to arrive afterward.
+    func cancelButtonSessions() {
+        buttonClaims.removeAll()
         guard !gestureSessions.isEmpty else { return }
         gestureSessions.removeAll()
         onGestureActivityChanged?(false)
     }
+
+    var activeButtonClaimCount: Int { buttonClaims.count }
+    var activeGestureSessionCount: Int { gestureSessions.count }
 
     // MARK: - Entry point
 
@@ -112,12 +129,34 @@ final class EventRouter {
         return handleWheel(event, settings: settings)
     }
 
-    private func handleContinuous(_ event: CGEvent, settings: ScrollSettings) -> Unmanaged<CGEvent>? {
-        let wantsReverse = settings.reverseContinuousDevices
-            && (settings.reverseVertical || settings.reverseHorizontal)
-        let wantsSmoothing = settings.affectContinuousDevices && settings.smoothingEnabled
+    struct ContinuousScrollPolicy: Equatable {
+        let smooth: Bool
+        let reverseVertical: Bool
+        let reverseHorizontal: Bool
 
-        if wantsSmoothing {
+        var reversesAnyAxis: Bool { reverseVertical || reverseHorizontal }
+
+        func adjusted(vertical: Double, horizontal: Double) -> (vertical: Double, horizontal: Double) {
+            (
+                reverseVertical ? -vertical : vertical,
+                reverseHorizontal ? -horizontal : horizontal
+            )
+        }
+    }
+
+    static func continuousPolicy(for settings: ScrollSettings) -> ContinuousScrollPolicy {
+        let reverse = settings.reverseContinuousDevices
+        return ContinuousScrollPolicy(
+            smooth: settings.affectContinuousDevices && settings.smoothingEnabled,
+            reverseVertical: reverse && settings.reverseVertical,
+            reverseHorizontal: reverse && settings.reverseHorizontal
+        )
+    }
+
+    func handleContinuous(_ event: CGEvent, settings: ScrollSettings) -> Unmanaged<CGEvent>? {
+        let policy = Self.continuousPolicy(for: settings)
+
+        if policy.smooth {
             let dy = ScrollEventFields.vertical.read(from: event).fixedPoint
             let dx = ScrollEventFields.horizontal.read(from: event).fixedPoint
             // A non-finite delta cannot be represented by the easing state. Pass the original
@@ -127,24 +166,30 @@ final class EventRouter {
             // Same rule as the wheel path: never swallow what we cannot re-deliver.
             guard let target = ScrollEventPoster.target(from: event) else {
                 stats.withValue { $0.wheelEventsUndeliverable += 1 }
+                if policy.reversesAnyAxis {
+                    Self.flipAxes(
+                        of: event,
+                        vertical: policy.reverseVertical,
+                        horizontal: policy.reverseHorizontal
+                    )
+                }
                 return Unmanaged.passUnretained(event)
             }
-            let signY: Double = settings.reverseVertical ? -1 : 1
-            let signX: Double = settings.reverseHorizontal ? -1 : 1
+            let adjusted = policy.adjusted(vertical: dy, horizontal: dx)
             guard animator.enqueue(
-                vertical: dy * signY,
-                horizontal: dx * signX,
+                vertical: adjusted.vertical,
+                horizontal: adjusted.horizontal,
                 settings: settings,
                 target: target
             ) else { return Unmanaged.passUnretained(event) }
             return nil
         }
 
-        if wantsReverse {
+        if policy.reversesAnyAxis {
             Self.flipAxes(
                 of: event,
-                vertical: settings.reverseVertical,
-                horizontal: settings.reverseHorizontal
+                vertical: policy.reverseVertical,
+                horizontal: policy.reverseHorizontal
             )
         }
         return Unmanaged.passUnretained(event)
@@ -271,16 +316,25 @@ final class EventRouter {
 
     // MARK: - Buttons
 
-    private func handleButton(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    func handleButton(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
+        let isDown = type == .otherMouseDown
 
-        // Recording mode takes priority over every binding, otherwise a button already
-        // mapped to Mission Control could never be recorded again.
+        // A swallowed down owns its matching release regardless of what changed meanwhile:
+        // modifiers may have been released, bindings edited, the app disabled, or capture ended.
+        if !isDown, let claim = buttonClaims.removeValue(forKey: button) {
+            finishButtonClaim(claim, button: button)
+            return nil
+        }
+        guard isDown else { return Unmanaged.passUnretained(event) }
+
+        // Recording mode takes priority over every binding, otherwise a button already mapped
+        // to Mission Control could never be recorded again. Its release is claimed as well;
+        // capture normally ends asynchronously before that release arrives.
         if let report = captureHandler.value {
-            if type == .otherMouseDown {
-                let modifiers = event.flags.rawValue & Self.modifierMask
-                DispatchQueue.main.async { report(button, modifiers) }
-            }
+            let modifiers = event.flags.rawValue & Self.modifierMask
+            buttonClaims[button] = .capture
+            DispatchQueue.main.async { report(button, modifiers) }
             return nil
         }
 
@@ -292,42 +346,43 @@ final class EventRouter {
             return Unmanaged.passUnretained(event)
         }
         let action = binding.action
-        Trace.buttonSeen(button: button, isDown: type == .otherMouseDown, action: "\(action)")
+        buttonClaims[button] = .action(action)
+        Trace.buttonSeen(button: button, isDown: true, action: "\(action)")
 
         if action == .gestureNavigation {
-            if type == .otherMouseDown {
-                let wasIdle = gestureSessions.isEmpty
-                var recognizer = MouseGestureRecognizer()
-                recognizer.begin(at: event.location)
-                gestureSessions[button] = recognizer
-                motionEventCount = 0
-                Trace.gestureBegan(button: button)
-                if wasIdle { onGestureActivityChanged?(true) }
-            } else if let session = gestureSessions.removeValue(forKey: button) {
-                Trace.gestureEnded(
-                    button: button,
-                    asClick: session.shouldTreatAsClick,
-                    travelled: session.maximumDistanceFromOrigin,
-                    motionEvents: motionEventCount
-                )
-                if gestureSessions.isEmpty { onGestureActivityChanged?(false) }
-                // A hold that never moved is a click, and a click on the gesture button
-                // opens Mission Control.
-                if session.shouldTreatAsClick {
-                    stats.withValue { $0.buttonActionsFired += 1 }
-                    actions.runAsync(.missionControl)
-                }
-            }
-            return nil
-        }
-
-        // Fire on press and swallow the matching release, so the app underneath never
-        // sees half a click.
-        if type == .otherMouseDown {
+            let wasIdle = gestureSessions.isEmpty
+            var recognizer = MouseGestureRecognizer()
+            recognizer.begin(at: event.location)
+            gestureSessions[button] = recognizer
+            motionEventCount = 0
+            Trace.gestureBegan(button: button)
+            if wasIdle { onGestureActivityChanged?(true) }
+        } else {
             stats.withValue { $0.buttonActionsFired += 1 }
-            actions.runAsync(action)
+            runAction(action)
         }
         return nil
+    }
+
+    private func finishButtonClaim(_ claim: ButtonClaim, button: Int) {
+        guard case let .action(action) = claim else { return }
+        Trace.buttonSeen(button: button, isDown: false, action: "\(action)")
+        guard action == .gestureNavigation,
+              let session = gestureSessions.removeValue(forKey: button) else { return }
+
+        Trace.gestureEnded(
+            button: button,
+            asClick: session.shouldTreatAsClick,
+            travelled: session.maximumDistanceFromOrigin,
+            motionEvents: motionEventCount
+        )
+        if gestureSessions.isEmpty { onGestureActivityChanged?(false) }
+        // A hold that never moved is a click, and a click on the gesture button opens Mission
+        // Control.
+        if session.shouldTreatAsClick {
+            stats.withValue { $0.buttonActionsFired += 1 }
+            runAction(.missionControl)
+        }
     }
 
     /// Feed pointer movement to any gesture hold in progress.
@@ -363,7 +418,7 @@ final class EventRouter {
             else { continue }
             Trace.recognized(direction: direction.rawValue, action: "\(direction.action)")
             stats.withValue { $0.buttonActionsFired += 1 }
-            actions.runAsync(direction.action)
+            runAction(direction.action)
         }
         return Unmanaged.passUnretained(event)
     }
