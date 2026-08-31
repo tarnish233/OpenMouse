@@ -223,8 +223,8 @@ enum SelfCheck {
             automaticScheduleUsesWallClock()
             updateRequestHasHardResourceDeadline()
             skippedReleaseIsFiltered()
-            parsesRelease()
-            rejectsBadPayload()
+            parsesReleaseRedirect()
+            rejectsUnexpectedReleaseURLs()
         }
 
         print("")
@@ -2588,6 +2588,9 @@ enum SelfCheck {
         let settings = UpdateSettings()
         expect(UpdateSettings.repository.contains("/"), "更新源已内置，开箱即可检查更新")
         expect(settings.checkAutomatically, "默认开启自动检查")
+        let page = UpdateChecker.latestReleasePageURL(repository: UpdateSettings.repository)
+        expect(page?.host == "github.com", "更新检查直接访问 GitHub Releases 页面")
+        expect(page?.host != "api.github.com", "更新检查不再消耗 GitHub REST API 匿名额度")
     }
 
     private static func comparesVersions() {
@@ -2642,13 +2645,13 @@ enum SelfCheck {
     }
 
     private static func skippedReleaseIsFiltered() {
+        guard let releaseURL = URL(string: "https://github.com/owner/repo/releases/tag/v9.9.9") else {
+            expect(false, "测试发布地址有效")
+            return
+        }
         let release = UpdateChecker.Release(
             version: "v9.9.9",
-            name: "Future",
-            notes: "",
-            url: URL(string: "https://github.com/owner/repo/releases/tag/v9.9.9")!,
-            publishedAt: nil,
-            isPrerelease: false
+            url: releaseURL
         )
         let outcome = UpdateChecker.Outcome.available(release)
         expect(
@@ -2665,33 +2668,36 @@ enum SelfCheck {
         )
     }
 
-    private static func parsesRelease() {
-        let json = """
-        {
-          "tag_name": "v0.2.0",
-          "name": "0.2.0 更快的滚动",
-          "body": "修了几个问题",
-          "html_url": "https://github.com/owner/repo/releases/tag/v0.2.0",
-          "published_at": "2026-08-01T10:00:00Z",
-          "prerelease": false
-        }
-        """
-        guard let data = json.data(using: .utf8), let release = UpdateChecker.parseRelease(data) else {
-            expect(false, "能解析 GitHub 的发布信息")
+    private static func parsesReleaseRedirect() {
+        guard let url = URL(string: "https://github.com/owner/repo/releases/tag/v0.2.0"),
+              let release = UpdateChecker.release(from: url, repository: "owner/repo") else {
+            expect(false, "能从 GitHub Releases 重定向解析发布信息")
             return
         }
         expect(release.version == "v0.2.0", "解析出版本标签")
-        expect(release.name == "0.2.0 更快的滚动", "解析出发布名称")
         expect(release.url.host == "github.com", "解析出发布页地址")
-        expect(release.publishedAt != nil, "解析出发布时间")
-        expect(!release.isPrerelease, "解析出是否为预发布")
     }
 
-    private static func rejectsBadPayload() {
-        expect(UpdateChecker.parseRelease(Data("not json".utf8)) == nil, "非 JSON 返回 nil 而不是崩溃")
+    private static func rejectsUnexpectedReleaseURLs() {
+        expect(UpdateChecker.latestReleasePageURL(repository: "owner") == nil, "缺少仓库名时拒绝构造更新地址")
+        expect(UpdateChecker.latestReleasePageURL(repository: "owner/repo/extra") == nil, "多余路径段不会进入更新地址")
+        guard let otherHost = URL(string: "https://example.com/owner/repo/releases/tag/v1.0.0"),
+              let otherRepository = URL(string: "https://github.com/other/repo/releases/tag/v1.0.0"),
+              let releasesIndex = URL(string: "https://github.com/owner/repo/releases") else {
+            expect(false, "测试发布地址有效")
+            return
+        }
         expect(
-            UpdateChecker.parseRelease(Data("{\"tag_name\":\"v1\"}".utf8)) == nil,
-            "缺少必要字段时返回 nil"
+            UpdateChecker.release(from: otherHost, repository: "owner/repo") == nil,
+            "非 GitHub 重定向不会成为更新链接"
+        )
+        expect(
+            UpdateChecker.release(from: otherRepository, repository: "owner/repo") == nil,
+            "其他仓库的发布页不会被误认成当前应用更新"
+        )
+        expect(
+            UpdateChecker.release(from: releasesIndex, repository: "owner/repo") == nil,
+            "没有版本标签的发布列表不会被误解析"
         )
     }
 }

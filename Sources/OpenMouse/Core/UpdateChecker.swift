@@ -1,19 +1,16 @@
 import Foundation
 
-/// Checks GitHub Releases for a newer build.
+/// Checks GitHub Releases for a newer build without using the rate-limited REST API.
 ///
 /// Deliberately not Sparkle: Sparkle needs an EdDSA key pair, a hosted appcast and a signed
 /// archive per release. This app is distributed as a repo you build yourself, so the honest
-/// mechanism is "ask GitHub what the latest tag is, and if it is newer, point at the release
-/// page". No auto-install, no update keys to lose, nothing running with elevated rights.
+/// mechanism is "follow GitHub's latest-release redirect, compare its tag, then point at that
+/// page". No API token, no auto-install, no update keys to lose, and nothing running with
+/// elevated rights.
 enum UpdateChecker {
     struct Release: Codable, Equatable, Sendable {
         var version: String
-        var name: String
-        var notes: String
         var url: URL
-        var publishedAt: Date?
-        var isPrerelease: Bool
     }
 
     enum Outcome: Equatable, Sendable {
@@ -52,29 +49,44 @@ enum UpdateChecker {
         return false
     }
 
-    /// Parses the payload of `GET /repos/{owner}/{repo}/releases/latest`.
-    /// Split out from the network call so the parsing can be checked without a request.
-    static func parseRelease(_ data: Data) -> Release? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        guard let tag = root["tag_name"] as? String,
-              let urlString = root["html_url"] as? String,
-              let url = URL(string: urlString)
-        else { return nil }
+    private static func repositoryComponents(_ repository: String) -> [String]? {
+        let components = repository
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard components.count == 2, components.allSatisfy({ !$0.isEmpty }) else { return nil }
+        return components
+    }
 
-        var published: Date?
-        if let stamp = root["published_at"] as? String {
-            published = ISO8601DateFormatter().date(from: stamp)
-        }
-        return Release(
-            version: tag,
-            name: (root["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? tag,
-            notes: (root["body"] as? String) ?? "",
-            url: url,
-            publishedAt: published,
-            isPrerelease: (root["prerelease"] as? Bool) ?? false
-        )
+    /// GitHub redirects this stable page to `/releases/tag/<version>`. It is a normal web
+    /// request, so every installed copy does not compete for the REST API's anonymous IP quota.
+    static func latestReleasePageURL(repository: String) -> URL? {
+        guard let components = repositoryComponents(repository),
+              let github = URL(string: "https://github.com") else { return nil }
+        return github
+            .appending(path: components[0])
+            .appending(path: components[1])
+            .appending(path: "releases")
+            .appending(path: "latest")
+    }
+
+    /// Extracts the tag only from the expected repository's final GitHub release URL. Keeping
+    /// this strict prevents a proxy or an unexpected redirect from becoming an update link.
+    static func release(from redirectedURL: URL, repository: String) -> Release? {
+        guard let repository = repositoryComponents(repository),
+              redirectedURL.scheme?.lowercased() == "https",
+              redirectedURL.host?.lowercased() == "github.com" else { return nil }
+
+        let path = redirectedURL.pathComponents.filter { $0 != "/" }
+        guard path.count == 5,
+              path[0].caseInsensitiveCompare(repository[0]) == .orderedSame,
+              path[1].caseInsensitiveCompare(repository[1]) == .orderedSame,
+              path[2] == "releases",
+              path[3] == "tag" else { return nil }
+
+        let tag = path[4].removingPercentEncoding ?? path[4]
+        guard !tag.isEmpty else { return nil }
+        return Release(version: tag, url: redirectedURL)
     }
 
     static let requestTimeout: TimeInterval = 15
@@ -91,28 +103,27 @@ enum UpdateChecker {
 
     static func check(repository: String, currentVersion: String) async -> Outcome {
         let repo = repository.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !repo.isEmpty, repo.contains("/") else { return .notConfigured }
-        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else {
-            return .failed("仓库地址无效")
-        }
+        guard !repo.isEmpty else { return .notConfigured }
+        guard let url = latestReleasePageURL(repository: repo) else { return .failed("仓库地址无效") }
 
         var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
         request.timeoutInterval = requestTimeout
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        // GitHub rejects unidentified clients on some paths.
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
         request.setValue("OpenMouse/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
         let session = URLSession(configuration: sessionConfiguration())
         defer { session.invalidateAndCancel() }
         do {
-            let (data, response) = try await session.data(for: request)
+            let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .failed("无法解析服务器响应")
             }
             switch http.statusCode {
             case 200:
-                guard let release = parseRelease(data) else {
-                    return .failed("无法解析发布信息")
+                guard let finalURL = http.url,
+                      let release = release(from: finalURL, repository: repo) else {
+                    return .failed("无法从 GitHub Releases 重定向解析版本")
                 }
                 guard let isNewer = isNewer(release.version, than: currentVersion) else {
                     return .failed(
@@ -123,7 +134,9 @@ enum UpdateChecker {
             case 404:
                 return .failed("仓库或发布不存在（404）")
             case 403:
-                return .failed("请求被限流（403），请稍后再试")
+                return .failed("GitHub 拒绝了请求（403），请稍后再试")
+            case 429:
+                return .failed("GitHub 请求过于频繁（429），请稍后再试")
             default:
                 return .failed("服务器返回 \(http.statusCode)")
             }

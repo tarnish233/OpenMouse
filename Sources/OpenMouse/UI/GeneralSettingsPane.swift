@@ -246,19 +246,6 @@ private struct UpdateSection: View {
         }
     }
 
-    /// Release notes arrive as raw Markdown. Rendering the inline syntax turns a wall of
-    /// `[text](very-long-percent-encoded-url)` into readable prose with a real link, while
-    /// `inlineOnlyPreservingWhitespace` keeps the author's line breaks intact.
-    private static func renderedNotes(_ markdown: String) -> AttributedString? {
-        let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        return (try? AttributedString(markdown: trimmed, options: options))
-            ?? AttributedString(trimmed)
-    }
-
     @ViewBuilder
     private var outcomeRow: some View {
         switch updates.outcome {
@@ -280,23 +267,16 @@ private struct UpdateSection: View {
         case .available:
             if let release = updates.pendingRelease {
                 VStack(alignment: .leading, spacing: 8) {
-                Label(Strings.updateAvailable(release.version), systemImage: "arrow.down.circle.fill")
-                    .font(.headline)
-                    .foregroundStyle(.tint)
-                if let notes = Self.renderedNotes(release.notes) {
-                    Text(notes)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(6)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 8) {
-                    Button(Strings.updateOpen) { updates.open(release) }
-                        .controlSize(.small)
-                        .buttonStyle(.borderedProminent)
-                    Button(Strings.updateSkip) { updates.skip(release) }
-                        .controlSize(.small)
-                }
+                    Label(Strings.updateAvailable(release.version), systemImage: "arrow.down.circle.fill")
+                        .font(.headline)
+                        .foregroundStyle(.tint)
+                    HStack(spacing: 8) {
+                        Button(Strings.updateOpen) { updates.open(release) }
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                        Button(Strings.updateSkip) { updates.skip(release) }
+                            .controlSize(.small)
+                    }
                 }
                 .padding(.vertical, 2)
             }

@@ -137,7 +137,7 @@ enum Strings {
     // Updates
     static let updateSection = "更新"
     static let updateAuto = "自动检查更新"
-    static let updateAutoHelp = "每天最多检查一次，只读取 GitHub 的最新发布信息，不会自动安装。"
+    static let updateAutoHelp = "每天最多检查一次，直接读取 GitHub Releases，不使用 API，也不会自动安装。"
     static let updateCheckNow = "立即检查"
     static let updateChecking = "正在检查…"
     static let updateNotConfigured = "未配置更新源"

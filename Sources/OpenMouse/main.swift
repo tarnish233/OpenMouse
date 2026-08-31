@@ -61,10 +61,8 @@ if let index = CommandLine.arguments.firstIndex(of: "--check-update") {
             print("已是最新版本: \(current)")
             code = 0
         case let .available(release):
-            print("发现新版本: \(release.version) (\(release.name))")
-            print("  预发布: \(release.isPrerelease)")
+            print("发现新版本: \(release.version)")
             print("  发布页: \(release.url)")
-            if let date = release.publishedAt { print("  发布于: \(date)") }
             code = 0
         case let .failed(message):
             print("检查失败: \(message)")
