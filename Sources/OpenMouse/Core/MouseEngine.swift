@@ -44,6 +44,9 @@ final class MouseEngine {
     private let motionTap: any EventTapLifecycle
     private let isTrusted: () -> Bool
     private var permissionPoll: Timer?
+    private var tapRetry: Timer?
+    private var currentMainMask: CGEventMask?
+    private var lastAppliedPreferences: Preferences?
 
     private convenience init() {
         let store = SettingsStore.shared
@@ -113,13 +116,17 @@ final class MouseEngine {
 
     /// Reconcile the tap with the current stored preferences.
     func apply() {
-        guard let store else { return }
-        apply(preferences: store.preferences)
+        if let store {
+            apply(preferences: store.preferences)
+        } else if let lastAppliedPreferences {
+            apply(preferences: lastAppliedPreferences)
+        }
     }
 
     /// The actual state transition, exposed internally so self-checks can prove that every
     /// non-running state converges both taps and all in-flight sessions to stopped/empty.
     func apply(preferences prefs: Preferences, pollIfNeeded: Bool = true) {
+        lastAppliedPreferences = prefs
         router.updateBindings(prefs.buttons)
 
         guard prefs.enabled || isCapturingButton else {
@@ -136,18 +143,31 @@ final class MouseEngine {
         }
 
         stopPermissionPoll()
+        let mask = Self.eventMask(for: prefs, capturingButtons: isCapturingButton)
+        if tap.isRunning, currentMainMask == mask {
+            // Scroll/rule values live in lock-protected snapshots and bindings update above.
+            // If the subscribed event types did not change, replacing the run-loop source is
+            // pure disruption: it drops events and tears down gestures while sliders move.
+            stopTapRetry()
+            status = .running
+            return
+        }
+
         // `EventTapController.start` replaces its run-loop source. Any swallowed down owned by
         // the old tap can no longer be paired reliably, so clear secondary state first.
         motionTap.stop()
         router.cancelButtonSessions()
         router.cancelInFlightScrolling()
+        currentMainMask = nil
 
-        let mask = Self.eventMask(for: prefs, capturingButtons: isCapturingButton)
         guard tap.start(mask: mask) else {
             teardownRuntime()
             status = .failed
+            if pollIfNeeded { startTapRetryIfNeeded() }
             return
         }
+        stopTapRetry()
+        currentMainMask = mask
         status = .running
     }
 
@@ -157,6 +177,8 @@ final class MouseEngine {
         router.cancelButtonSessions()
         router.cancelInFlightScrolling()
         stopPermissionPoll()
+        stopTapRetry()
+        currentMainMask = nil
     }
 
     private func handleAutoReenable(_ reason: EventTapDisableReason) {
@@ -271,4 +293,24 @@ final class MouseEngine {
         permissionPoll?.invalidate()
         permissionPoll = nil
     }
+
+    private func startTapRetryIfNeeded() {
+        guard tapRetry == nil, status == .failed else { return }
+        tapRetry = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.retryFailedTap() }
+        }
+    }
+
+    func retryFailedTap() {
+        stopTapRetry()
+        guard status == .failed else { return }
+        apply()
+    }
+
+    private func stopTapRetry() {
+        tapRetry?.invalidate()
+        tapRetry = nil
+    }
+
+    var hasPendingTapRetry: Bool { tapRetry != nil }
 }

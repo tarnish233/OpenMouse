@@ -584,12 +584,14 @@ return .stroke(Stroke(keyCode: UInt16(keyCode), flags: CGEventFlags(rawValue: UI
 | # | 位置 | 扫描结论 |
 |---|---|---|
 | C5 | `Core/UpdateChecker.swift:80` | **已确认并修复**：增加 30 秒 resource 总时限，滴流响应不能永久锁住 `isChecking` |
-| C6 | `Core/MouseEngine.swift:116` | 每次偏好变更都销毁并重建 tap（拖滑块时约 60 次/秒），期间有事件绕过 App 的窗口；`.failed` 是终态且无重试 |
+| C6 | `Core/MouseEngine.swift:116` | **已确认并修复**：事件掩码不变时复用主 tap，创建失败安排重试而不是停在终态 |
 | C7 | `Model/SettingsStore.swift:87` | **已确认并修复**：去抖编码/写盘移到 detached utility task |
 | C8 | `App/StatusItemController.swift:22` / `:159` | 状态变化时不调 `refreshIcon()`；已存在 `.custom` 规则时「停用当前应用」菜单项静默无效 |
 | C9 | `UI/AppRulesPane.swift:76` | 自定义规则只暴露了 10 个滚动字段中的 5 个 |
 
 **C5 / C7 复核结果**：两条都真实。`URLRequest.timeoutInterval` 只提供请求空闲超时，持续滴流仍可能长期占住一次 `data(for:)`，而 coordinator 的 `isChecking` 会阻止后续所有检查；现改用独立 ephemeral session，并同时设置 15 秒 request timeout 与 30 秒 resource 总时限。偏好保存的 `Task` 原先继承 `SettingsStore` 的 MainActor，sleep 后的 JSON 编码和原子写盘确实仍在主线程；现由 `PreferencesSaveWorker.schedule` 创建 detached utility task。自检增加 5 项：两条超时配置、后台执行、有限完成和编码快照完整性。总计 220 项。
+
+**C6 复核结果**：结论真实。偏好观察会在滚动滑块、应用规则等任意字段变化时进入 `apply`，旧实现无条件替换主 tap 的 run-loop source，并同步取消按键/手势会话；连续拖动设置会制造事件监听空窗和手势中断。现缓存已订阅的事件掩码：掩码未变只更新锁保护的配置快照和按键绑定，掩码变化才重建；主 tap 创建失败会安排 1 秒后重试，成功或离开运行条件时统一取消。自检增加 4 项，覆盖滚动参数变化不重启主 tap、不打断活动手势、失败会安排重试和重试成功后收敛。总计 224 项。
 
 **整理类（非缺陷）**：界面文案有散落在 `Strings.swift` 之外的；Status→标签的 switch 重复了两处且颜色已经不一致；`ConflictMonitor` 每次应用切换都做一遍全量进程扫描；tap 回调里有每事件分配（`Array(gestureSessions.keys)`、`"\(action)"` 插值）。
 
@@ -626,4 +628,3 @@ F8、F6、F12、F14、F13、F15，以及 C1、C2、C4 均已处理；自检 215 
 3. **`ScrollAxis.add` 溢出时把累积距离清成 0，而 `enqueue` 仍返回 `true`** —— 路由层已经吞掉了那一格，严格说违反约束 2。需要 `remaining` 到 1e308 量级才可能，实际不可达，记一笔即可。
 
 真实帧源目前只有生命周期一致性被钉住（`realTickerLifecycleIsCoherent`）。**刻意没有断言「帧真的会来」**：那要依赖有显示器、依赖 run loop 被及时调度，一条会在 SSH 上变红的断言比没有这条更糟。同理约束 9（帧源选哪块屏幕）仍然没有覆盖。
-

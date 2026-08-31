@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检 220 项 + 发布签名脚本检查 6 项，必须全过
+make test     # 内置自检 224 项 + 发布签名脚本检查 6 项，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -157,6 +157,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 - 界面文案全部集中在 `Strings.swift`，目前只有中文。
 - 设置界面遵循 `macos-settings-ui` skill 的写法（`NSWindowController` + `.fullSizeContentView` + 透明 `Form`）。
 - 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询；任何离开运行态的分支都通过同一个 teardown 同时停止主 tap、motion tap、会话与轮询。
+- 偏好变化只有在主 tap 的事件掩码发生变化时才允许重建监听；滚动参数、应用规则等快照更新不能中断正在进行的手势。主 tap 创建失败不是终态，必须安排有限间隔的重试并在离开失败态时取消定时器。
 - 偏好 JSON 的 400ms 去抖编码/写盘必须由 `PreferencesSaveWorker` 在 detached utility task 完成，不能占用主线程上的事件 tap run loop；`saveNow()` 只用于窗口关闭/进程退出的显式同步落盘。
 - 注释写「为什么」，尤其是那些看起来可以简化但不能简化的地方——这个项目里大部分坑都长得像多余的代码。
 

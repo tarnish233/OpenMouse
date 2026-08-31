@@ -1396,6 +1396,14 @@ enum SelfCheck {
             _ = router.handleButton(type: .otherMouseDown, event: firstDown)
             expect(motionTap.isRunning, "手势按下时按需启动移动监听")
 
+            prefs.scroll.speed = 4.25
+            engine.apply(preferences: prefs, pollIfNeeded: false)
+            expect(mainTap.startMasks.count == 1, "只改滚动参数不会销毁并重建主监听")
+            expect(
+                motionTap.isRunning && router.activeGestureSessionCount == 1,
+                "同一事件掩码的偏好更新不会中断正在进行的手势"
+            )
+
             trusted = false
             engine.apply(preferences: prefs, pollIfNeeded: false)
             expect(engine.status == .needsPermission, "权限丢失后状态切到需要授权")
@@ -1433,6 +1441,30 @@ enum SelfCheck {
 
             engine.stop()
             expect(engine.status == .off && !mainTap.isRunning && !motionTap.isRunning, "显式停止收敛为完全关闭")
+
+            let retryRouter = EventRouter(config: Locked(.inactive), runAction: { _ in })
+            let retryTap = ProbeEventTap()
+            retryTap.startSucceeds = false
+            let retryEngine = MouseEngine(
+                store: nil,
+                router: retryRouter,
+                tap: retryTap,
+                motionTap: ProbeEventTap(),
+                isTrusted: { true }
+            )
+            retryEngine.apply(preferences: Preferences(), pollIfNeeded: true)
+            expect(
+                retryEngine.status == .failed && retryEngine.hasPendingTapRetry,
+                "主监听创建失败会安排重试，不是进程内终态"
+            )
+            retryTap.startSucceeds = true
+            retryEngine.retryFailedTap()
+            expect(
+                retryEngine.status == .running && retryTap.startMasks.count == 2
+                    && !retryEngine.hasPendingTapRetry,
+                "重试成功后恢复运行并取消失败定时器"
+            )
+            retryEngine.stop()
         }
     }
 
