@@ -16,6 +16,7 @@
 | 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | **已复核并完成**（F4 核心结论驳回；自检 145 → 152 项） |
 | 4 | F7、F9、F10、F11 | **已修复并核实**（自检 152 → 183 项） |
 | 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | **已修复并核实**（自检 183 → 215 项，另有 6 项发布签名检查） |
+| 追加复核 | C5、C6、C7、C8、C9 | **已逐条确认并修复**（自检 215 → 230 项，发布签名检查仍为 6 项） |
 
 第 1 批的核实方式：读代码确认锁序无反转（animator 锁 → ticker 锁，三个调用点方向一致）、真机 26 段滑行放大稳定在 9.6x 且无投递失败、空闲 CPU 0.0%。遗留的三点小问题记在 §6 末尾。
 
@@ -27,6 +28,8 @@
 
 第 5 批第一子批完成 F8、C1、C2、C4：未录入快捷键改用 `KeyCombo.unset` 且投递前拒绝；设置窗口通过幂等 activation lease 持有引用；版本读取失败显示「未知」；用户可写系统快捷键数值使用 exact narrowing。release 构建通过，`make test` 195/195。第二子批完成 F6：选择“不替用户猜斜划方向”，所有未形成主轴方向的输入在抬起时回落为手势按钮单击；自检 197/197。第三子批完成 F12：滚动规则按事件 target pid 经通知维护的 bundle-id 快照解析，未知 pid 回落全局规则，tap 回调不做 IPC；自检 202/202。第四子批完成 F13/F14：版本比较改为三态并拒绝损坏/溢出分量；自动检查按持久化时间设置真实定时器、唤醒后重算，失败仅做 1 小时内存退避；更新 UI 实际消费 `pendingRelease` 过滤跳过版本。自检 215/215。第五子批完成 F15：`make dist` 强制显式 Developer ID、hardened runtime 与安全时间戳，签名读回校验不过即失败；`make test` 新增 6 项 shell 检查。
 
+追加复核确认 C5–C9 全部真实并完成修复：更新请求增加 resource 总时限、偏好保存移出 MainActor、事件掩码不变时不重建 tap 且失败可重试、状态栏持续观察运行态并正确切换已有 custom 规则、应用级编辑器覆盖全部滚动字段。最终 HEAD 的 `swift build -c release` 通过，`make test` 为 **230/230 项自检 + 6/6 项发布签名检查**。
+
 `CLAUDE.md` 里 §4 指出的两句假话已经改掉了（约束 11 的覆盖范围、测试一节声称的断言覆盖）。
 
 ## 怎么读这份文档
@@ -37,19 +40,19 @@
   - 已处理条目会改成 `已修复` 或写明复核后驳回原结论。
 - 每条都给了**修复要建立的性质**而不是具体补丁。挑实现方式是修的人的事，但那条性质必须成立。
 - **应补断言**一栏不是可选项。项目的约定是「修 bug 之后要补一条断言」，而 §4 说明了为什么这次特别重要。
-- 编号 `F1`–`F15` 是已验证的缺陷，`C1`–`C9` 是未逐条验证的候选项。
+- 编号 `F1`–`F15` 是首轮报告项，`C1`–`C9` 是当时受条数上限影响的候选项；现在两组都已逐条复核，确认的缺陷均已修复，F4 的核心结论则已依据字段定义和实测驳回。
 
 ## 优先级总表
 
 | # | 位置 | 问题 | 判定 |
 |---|---|---|---|
 | **P0 —— 滚轮永久失效，只能重启进程** | | | |
-| F1 | `Core/ScrollEngine.swift:197` | `running` 与帧源生命周期不在同一临界区，竞态后闩死 | 已确认 |
-| F5 | `Core/ScrollAxis.swift:39` | 无 `isFinite` 检查，一个 NaN 让动画永不终止 | 待确认 |
+| F1 | `Core/ScrollEngine.swift:197` | `running` 与帧源生命周期不在同一临界区，竞态后闩死 | **已修复（第 1 批）** |
+| F5 | `Core/ScrollAxis.swift:39` | 无 `isFinite` 检查，一个 NaN 让动画永不终止 | **已做防御性修复（第 1 批）** |
 | **P1 —— 已经破掉的硬性约束** | | | |
 | F4 | `Core/EventRouter.swift:277` | 原报告把 `PointDelta` 类型判反；真实问题是字段语义散落且无断言 | **复核后驳回原结论，已收口** |
-| F2 | `Core/KeyboardLayout.swift:31` | 约束 5：键码兜底返回 `0`（一个真键），发出另一个快捷键 | 已确认 |
-| F3 | `Model/Settings.swift:118` | 约束 11：`KeyCombo` / `MouseAction` 没有手写 `init(from:)`，会静默清空用户映射 | 已确认 |
+| F2 | `Core/KeyboardLayout.swift:31` | 约束 5：键码兜底返回 `0`（一个真键），发出另一个快捷键 | **已修复（第 3 批）** |
+| F3 | `Model/Settings.swift:118` | 约束 11：`KeyCombo` / `MouseAction` 没有手写 `init(from:)`，会静默清空用户映射 | **已修复（第 2 批）** |
 | **P2 —— 功能性缺陷** | | | |
 | F7 | `Core/EventRouter.swift:320` | 松开修饰键再松开按键，手势会话被搁死，motion tap 永久订阅 | **已修复（第 4 批）** |
 | F9 | `Core/MouseEngine.swift:109` | 未授权分支不拆 motion tap，`isRunning` 变陈旧真，重新授权后手势永久失效 | **已修复（第 4 批）** |
@@ -86,7 +89,7 @@ func cancel() {
 
 `cancel()` 重置了轴、两个滤波器和 target，**唯独没有重置 `running`**。而 `running` 恰好是 F1 和 F5 闩死的那个位。所以：设置里关掉再打开不行（走的是 `cancel()`），撤销再重新授权也不行，只能杀掉进程重启。
 
-### F1 —— `running` 与帧源生命周期不在同一临界区（已确认）
+### F1 —— `running` 与帧源生命周期不在同一临界区（已确认；第 1 批已修复）
 
 **位置**：`Core/ScrollEngine.swift:197`（`tick()` 的 `.finish` 分支）、`:142`（`enqueue()` 的守卫）、`:167`（`startTicker()`）、`Core/DisplayLinkTicker.swift:73`（`start()` 的守卫）
 
@@ -117,7 +120,9 @@ func cancel() {
 
 **应补断言**：现在这个组里没有任何东西检查 `running` 与帧源的一致性。至少要有一条能覆盖「结束帧与新一格交错」的顺序：把 `tick()` 走到 `.finish`、在 `stopTicker()` 之前注入一次 `enqueue()`，然后断言帧源仍然活着或 `running` 已被清掉——两者必有其一成立。要做到这一点可能需要把帧源抽成一个可注入的协议，值得。
 
-### F5 —— 无 `isFinite` 检查，NaN 让动画永不终止（待确认）
+**第 1 批修复结果**：以 `ActiveTicker?` 代替独立的 `running` 布尔量，作为帧源生命周期的唯一事实；ticker 代次丢弃已拆源的迟到回调，输入修订号让旧 finish 只能条件提交，`cancel()` 在同一临界区内复位动画并停掉帧源。可注入 fake ticker 精确复现结束帧与新输入交错，自检同时驱动真实 `DisplayLinkTicker` 的停止/重启一致性。
+
+### F5 —— 无 `isFinite` 检查，NaN 让动画永不终止（防御性确认；第 1 批已修复）
 
 **位置**：`Core/ScrollAxis.swift:39`（`advance()`）；入口在 `Core/EventRouter.swift:158`（`rawDelta`）和 `travel(forRawDelta:)`
 
@@ -142,6 +147,8 @@ func cancel() {
 > 进入累加器的每个增量都是有限值；任何非有限输入在管线入口被丢弃并放行原事件（约束 2：投不出去就不要吞）。
 
 **应补断言**：喂一个 `.infinity` 和一个 `.nan` 给 `ScrollAxis.add(_:)` / `travel(forRawDelta:)`，断言 `isIdle` 在有限步数内成立。
+
+**第 1 批修复结果**：虽然没有证明 macOS 自身会生成非有限滚动增量，但畸形第三方驱动事件的风险成立且修复成本极低，因此按防御性缺陷处理。动画入口、`ScrollAxis` 和行程换算三层都拒绝 NaN/Inf，路由层在无法生成有限替代事件时放行原事件；自检覆盖非有限输入不污染累加器、动画仍可终止。
 
 ---
 
@@ -170,7 +177,7 @@ func cancel() {
 
 **已补断言**：构造同时带 line、整数 PointDelta 和小数 FixedPtDelta 的双轴事件，翻转后断言三个表示都按真实字段类型完整取反。
 
-### F2 —— 约束 5：键码兜底返回 `0`，那是一个真键（已确认）
+### F2 —— 约束 5：键码兜底返回 `0`，那是一个真键（已确认；第 3 批已修复）
 
 **位置**：`Core/KeyboardLayout.swift:31`（兜底）、`:70`（缓存失败的读取）、`:110`（构表时不带修饰键）
 
@@ -205,7 +212,7 @@ let built = build() ?? [:]
 
 **应补断言**：现有的 `hasFallbackForEveryCharacter`（`SelfCheck.swift:818`）是同义反复的，见 §4——它必须改成从 `ActionRunner.stroke(for:)` **反向枚举**实际用到的字符集，再断言每个都能解析出非 `nil` 键码。
 
-### F3 —— 约束 11：`KeyCombo` / `MouseAction` 没有手写 `init(from:)`（已确认）
+### F3 —— 约束 11：`KeyCombo` / `MouseAction` 没有手写 `init(from:)`（已确认；第 2 批已修复）
 
 **位置**：`Model/Settings.swift:106`（`KeyCombo`）、`:118`（`MouseAction`）
 
@@ -539,9 +546,9 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 
 ---
 
-## 5. 候选项（未逐条走完验证）
+## 5. 候选项（现已全部复核）
 
-这些是被条数上限砍掉的。**C1–C4 我事后单独核实过，是真的**；C5–C9 只有扫描阶段的结论，动手前请自行确认。
+这些条目在首轮审查时因条数上限没有全部展开；后续已经逐条复核。C1–C9 均确认真实并完成修复，具体依据与结果如下。
 
 ### C1 —— `AppActivationPolicy` 引用计数泄漏（已核实；第 5 批已修复）
 
@@ -561,13 +568,15 @@ CLAUDE.md 写明版本号的**唯一来源**是 `Info.plist`。这个兜底违�
 
 **第 5 批修复结果**：`AppVersion.value` 对缺失/空值返回「未知」，不再内置任何版本号；自检同时覆盖缺失和真实 Info.plist 值。
 
-### C3 —— 跨线程变量没走 `Locked` 约定（已核实）
+### C3 —— 跨线程变量没走 `Locked` 约定（已核实；第 1 批已修复）
 
 `Core/ScrollEngine.swift:105` 的 `private var ticker: DisplayLinkTicker?`：被 `startTicker()` / `stopTicker()`（主线程）和 `frameSource`（诊断读取）访问，无同步。
 
 `Core/DisplayLinkTicker.swift:21` 的 `private var thread: Thread?`：类里有 `lock`，但 `thread` 的赋值（`start()` 里 `self.thread = thread`）和读取（`stop()` 里 `thread?.cancel()`）都在锁**外**。
 
 CLAUDE.md 的约定是「跨线程共享状态统一走 `Locked`」。这两处是例外，而 F1 正好发生在这一带——修 F1 时会同时碰到它们。
+
+**第 1 批修复结果**：`DisplayLinkTicker` 的 display link、线程、fallback timer 和诊断来源全部收进 `Locked<Runtime>`，start/stop 成为同一把锁下的状态转换；动画侧的 ticker 句柄进入 `ScrollAnimator.State` 的锁保护。锁序固定为 animator 锁 → ticker 锁，并用真实 ticker 生命周期自检覆盖停止和重新启动。
 
 ### C4 —— `SystemHotkeys.swift:143` 无检查窄化转换（已核实；第 5 批已修复）
 
