@@ -20,13 +20,19 @@ struct ScrollAxis: Equatable {
     var isIdle: Bool { remaining == 0 }
 
     mutating func add(_ delta: Double) {
-        guard delta != 0 else { return }
+        // Third-party drivers still enter through CGEvent, and a malformed NaN/Inf would make
+        // every termination comparison false. Reject it at the accumulator boundary rather
+        // than leaving a 120 Hz ticker permanently alive.
+        guard delta.isFinite, delta != 0 else { return }
         // A flick in the opposite direction should feel immediate rather than fight the
         // leftover momentum, so discard the debt when the sign flips.
         if remaining != 0, (remaining > 0) != (delta > 0) {
             remaining = delta
         } else {
-            remaining += delta
+            let updated = remaining + delta
+            // Finite inputs can still overflow when accumulated. Resetting is preferable to
+            // poisoning the animator forever; the router's normal ranges never approach this.
+            remaining = updated.isFinite ? updated : 0
         }
     }
 
@@ -37,8 +43,16 @@ struct ScrollAxis: Equatable {
     /// Consume one frame's worth of travel and return it.
     /// - Parameter rate: fraction of the remaining distance to emit, in 0…1.
     mutating func advance(rate: Double) -> Double {
+        guard remaining.isFinite, rate.isFinite else {
+            reset()
+            return 0
+        }
         guard remaining != 0 else { return 0 }
         var step = remaining * rate
+        guard step.isFinite else {
+            reset()
+            return 0
+        }
         if abs(remaining) < Self.settleThreshold {
             step = remaining
         }

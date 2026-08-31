@@ -99,15 +99,25 @@ struct ScrollEventPoster {
 ///    first frame of every notch, which is the difference between "smooth" and "smooth but
 ///    it kicks".
 final class ScrollAnimator {
+    typealias TickerFactory = (@escaping () -> Void) -> ScrollFrameTicker
+
     private let poster = ScrollEventPoster()
     private let state = Locked(State())
     private let stats: Locked<EngineStats>
-    private var ticker: DisplayLinkTicker?
+    private let tickerFactory: TickerFactory
+    /// Deterministic seam used only by self-checks to inject a notch after a finish frame has
+    /// been prepared but before its conditional stop is committed.
+    private let beforeFinishCommit: (() -> Void)?
 
     /// Mos drops filtered output below one pixel rather than accumulating it. Matching that
     /// matters: accumulating instead means several silent frames followed by a 1 px jump,
     /// which is a stutter you can feel at the start and end of every scroll.
     private static let deadZone: Double = 1.0
+
+    private struct ActiveTicker {
+        var generation: UInt64
+        var source: ScrollFrameTicker
+    }
 
     private struct State {
         var vertical = ScrollAxis()
@@ -116,34 +126,70 @@ final class ScrollAnimator {
         var filterX = ScrollSmoothingFilter()
         var rate: Double = 0.085
         var emitPhases = false
-        var running = false
         var didEmitBegan = false
         var target: ScrollEventPoster.Target?
+        var ticker: ActiveTicker?
+        var nextTickerGeneration: UInt64 = 0
+        /// Incremented for every accepted input. A finish prepared against an older revision
+        /// is stale and must not tear down the source that is now carrying the new input.
+        var inputRevision: UInt64 = 0
     }
 
-    init(stats: Locked<EngineStats>) {
+    init(
+        stats: Locked<EngineStats>,
+        tickerFactory: @escaping TickerFactory = { DisplayLinkTicker(onTick: $0) },
+        beforeFinishCommit: (() -> Void)? = nil
+    ) {
         self.stats = stats
+        self.tickerFactory = tickerFactory
+        self.beforeFinishCommit = beforeFinishCommit
     }
 
     /// Queue distance to travel. Called from the event-tap callback on the main thread.
+    @discardableResult
     func enqueue(
         vertical: Double,
         horizontal: Double,
         settings: ScrollSettings,
         target: ScrollEventPoster.Target?
-    ) {
+    ) -> Bool {
+        // This is the last mandatory gate before values enter the easing/filter state. The
+        // router uses the return value to pass a malformed original event through instead of
+        // swallowing it without a replacement.
+        guard vertical.isFinite, horizontal.isFinite,
+              vertical != 0 || horizontal != 0 else { return false }
+
         let rate = ScrollAxis.rate(forSmoothness: settings.smoothness)
-        let shouldStart: Bool = state.withValue { state in
+        guard rate.isFinite else { return false }
+        return state.withValue { state in
             state.rate = rate
             state.emitPhases = settings.emitScrollPhases
             state.vertical.add(vertical)
             state.horizontal.add(horizontal)
             if let target { state.target = target }
-            guard !state.running else { return false }
-            state.running = true
+            state.inputRevision &+= 1
+
+            // The optional ticker is the only lifecycle truth. Publishing it and starting its
+            // underlying link/timer happen while this same lock is held, so no observer can see
+            // "running" without a live source (or vice versa).
+            guard state.ticker == nil else { return true }
+            state.nextTickerGeneration &+= 1
+            let generation = state.nextTickerGeneration
+            let ticker = tickerFactory { [weak self] in
+                self?.tick(tickerGeneration: generation)
+            }
+            guard ticker.start() else {
+                state.vertical.reset()
+                state.horizontal.reset()
+                state.filterY.reset()
+                state.filterX.reset()
+                state.didEmitBegan = false
+                state.target = nil
+                return false
+            }
+            state.ticker = ActiveTicker(generation: generation, source: ticker)
             return true
         }
-        if shouldStart { startTicker() }
     }
 
     /// Throw away queued movement — used when the engine is disabled mid-glide.
@@ -153,36 +199,55 @@ final class ScrollAnimator {
             state.horizontal.reset()
             state.filterY.reset()
             state.filterX.reset()
+            state.didEmitBegan = false
             state.target = nil
+            state.inputRevision &+= 1
+            state.ticker?.source.stop()
+            state.ticker = nil
         }
     }
 
     /// Which frame source the last glide used. Read by the diagnostics.
     var frameSource: DisplayLinkTicker.Source {
-        ticker?.activeSource ?? .idle
-    }
-
-    private func startTicker() {
-        if ticker == nil {
-            ticker = DisplayLinkTicker { [weak self] in self?.tick() }
+        state.withValue { state in
+            state.ticker?.source.activeSource ?? .idle
         }
-        ticker?.start()
     }
 
-    private func stopTicker() {
-        ticker?.stop()
+    /// Internal diagnostics used by self-checks to pin the lifecycle invariant.
+    var isRunning: Bool {
+        state.withValue { $0.ticker != nil }
+    }
+
+    var hasLiveFrameSource: Bool {
+        state.withValue { state in
+            state.ticker?.source.isRunning ?? false
+        }
     }
 
     private enum Outcome {
+        case ignore
         case emit(vertical: Double, horizontal: Double, phase: Phase, target: ScrollEventPoster.Target?)
         case hold
-        case finish(phase: Phase, target: ScrollEventPoster.Target?)
+        case finish(Finish)
 
         typealias Phase = ScrollEventPoster.Phase
     }
 
-    private func tick() {
+    private struct Finish {
+        var tickerGeneration: UInt64
+        var inputRevision: UInt64
+        var phase: ScrollEventPoster.Phase
+        var target: ScrollEventPoster.Target?
+    }
+
+    private func tick(tickerGeneration: UInt64) {
         let outcome: Outcome = state.withValue { state in
+            // A callback already queued when an old source was stopped may arrive after a new
+            // glide has started. Its generation cannot be allowed to advance or stop the new
+            // source.
+            guard state.ticker?.generation == tickerGeneration else { return .ignore }
+
             let stepY = state.vertical.advance(rate: state.rate)
             let stepX = state.horizontal.advance(rate: state.rate)
             let outY = state.filterY.filter(stepY)
@@ -194,13 +259,16 @@ final class ScrollAnimator {
             let axesIdle = state.vertical.isIdle && state.horizontal.isIdle
             let drained = !state.filterY.isDraining && !state.filterX.isDraining
             if axesIdle, drained {
-                state.running = false
                 let phase: ScrollEventPoster.Phase = (state.emitPhases && state.didEmitBegan) ? .ended : .none
                 state.didEmitBegan = false
-                let target = state.target
                 state.filterY.reset()
                 state.filterX.reset()
-                return .finish(phase: phase, target: target)
+                return .finish(Finish(
+                    tickerGeneration: tickerGeneration,
+                    inputRevision: state.inputRevision,
+                    phase: phase,
+                    target: state.target
+                ))
             }
 
             guard max(abs(outY), abs(outX)) > Self.deadZone else { return .hold }
@@ -214,17 +282,32 @@ final class ScrollAnimator {
         }
 
         switch outcome {
+        case .ignore:
+            break
         case .hold:
             break
         case let .emit(dy, dx, phase, target):
             poster.post(vertical: dy, horizontal: dx, phase: phase, target: target)
             stats.withValue { $0.syntheticEventsPosted += 1 }
-        case let .finish(phase, target):
-            if phase == .ended {
-                poster.post(vertical: 0, horizontal: 0, phase: .ended, target: target)
+        case let .finish(finish):
+            if finish.phase == .ended {
+                poster.post(vertical: 0, horizontal: 0, phase: .ended, target: finish.target)
             }
-            // Idle costs nothing: tear the frame source down until the next notch arrives.
-            stopTicker()
+
+            // A new notch is allowed to arrive while the ended event is being posted. It reuses
+            // the still-live source and increments `inputRevision`; the stale finish then fails
+            // this conditional commit instead of stopping that source underneath the new glide.
+            beforeFinishCommit?()
+            state.withValue { state in
+                guard state.ticker?.generation == finish.tickerGeneration,
+                      state.inputRevision == finish.inputRevision else { return }
+
+                // Stop and remove are one transition under the same lifecycle lock. An enqueue
+                // either sees the old live source or waits and starts a new one after it is gone.
+                state.ticker?.source.stop()
+                state.ticker = nil
+                state.target = nil
+            }
         }
     }
 }

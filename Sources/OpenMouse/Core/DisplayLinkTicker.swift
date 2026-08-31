@@ -1,6 +1,21 @@
 import AppKit
 import QuartzCore
 
+/// Injectable seam for the animator's frame source. Production uses `DisplayLinkTicker`;
+/// self-checks use a deterministic ticker so lifecycle interleavings can be reproduced.
+protocol ScrollFrameTicker: AnyObject {
+    var activeSource: DisplayLinkTicker.Source { get }
+    var isRunning: Bool { get }
+
+    /// Starting must not invoke `onTick` synchronously. A real display link/timer always
+    /// schedules its first callback later, and the animator relies on that while publishing
+    /// the new ticker inside its lifecycle lock.
+    @discardableResult
+    func start() -> Bool
+
+    func stop()
+}
+
 /// Vsync-locked frame source for the scroll animator.
 ///
 /// Three reasons this is not a plain timer:
@@ -14,14 +29,9 @@ import QuartzCore
 ///   SwiftUI both live on the main run loop; a settings window mid-relayout must not be able
 ///   to stall scroll frames — that would make the app feel worst precisely while the user is
 ///   adjusting the sliders.
-final class DisplayLinkTicker {
+final class DisplayLinkTicker: ScrollFrameTicker {
     private let onTick: () -> Void
-
-    private var link: CADisplayLink?
-    private var thread: Thread?
-    private var fallbackTimer: DispatchSourceTimer?
     private let fallbackQueue = DispatchQueue(label: "com.openmouse.frame-fallback", qos: .userInteractive)
-    private let lock = NSLock()
 
     /// Which frame source actually got used. Surfaced in `--verbose` because silently
     /// degrading to a timer would look exactly like "the smoothing is worse than Mos".
@@ -31,16 +41,28 @@ final class DisplayLinkTicker {
         case idle
     }
 
-    private var source: Source = .idle
+    /// All fields are read or mutated from more than one thread. Keeping them in one box also
+    /// makes start/stop an atomic transition: diagnostics cannot observe a source without its
+    /// matching thread/timer, and `stop()` cannot miss a thread that `start()` just published.
+    private struct Runtime {
+        var link: CADisplayLink?
+        var thread: Thread?
+        var fallbackTimer: DispatchSourceTimer?
+        var source: Source = .idle
+
+        var isRunning: Bool {
+            link != nil || fallbackTimer != nil
+        }
+    }
+
+    private let runtime = Locked(Runtime())
 
     init(onTick: @escaping () -> Void) {
         self.onTick = onTick
     }
 
     var activeSource: Source {
-        lock.lock()
-        defer { lock.unlock() }
-        return source
+        runtime.withValue { $0.source }
     }
 
     /// The display to lock onto: the one the pointer is on, because that is the one whose
@@ -60,79 +82,69 @@ final class DisplayLinkTicker {
     deinit { stop() }
 
     var isRunning: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return link != nil || fallbackTimer != nil
+        runtime.withValue { $0.isRunning }
     }
 
     /// Must be called from the main thread: `NSScreen` is main-actor state.
-    func start() {
-        lock.lock()
-        let alreadyRunning = link != nil || fallbackTimer != nil
-        lock.unlock()
-        guard !alreadyRunning else { return }
+    @discardableResult
+    func start() -> Bool {
+        runtime.withValue { runtime in
+            guard !runtime.isRunning else { return true }
 
-        guard let screen = Self.preferredScreen() else {
-            startFallback()
-            return
-        }
-
-        let link = screen.displayLink(target: self, selector: #selector(handleTick))
-        lock.lock()
-        self.link = link
-        source = .displayLink
-        lock.unlock()
-
-        // Park the link on its own run loop so main-thread work cannot delay frames.
-        let thread = Thread { [weak self] in
-            guard let self else { return }
-            link.add(to: .current, forMode: .common)
-            // `run(mode:before:)` in a loop lets the thread exit once the link is torn down.
-            while !Thread.current.isCancelled, self.isRunning {
-                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25))
+            guard let screen = Self.preferredScreen() else {
+                let fps = 120.0
+                let timer = DispatchSource.makeTimerSource(queue: fallbackQueue)
+                timer.schedule(
+                    deadline: .now(),
+                    repeating: .nanoseconds(Int(1_000_000_000.0 / fps)),
+                    leeway: .nanoseconds(0)
+                )
+                timer.setEventHandler { [weak self] in self?.onTick() }
+                runtime.fallbackTimer = timer
+                runtime.source = .timer
+                // Publish the timer before resuming it. If its first callback wins the race,
+                // it waits for this lock and then observes a fully running source.
+                timer.resume()
+                return true
             }
-            link.invalidate()
+
+            let link = screen.displayLink(target: self, selector: #selector(handleTick))
+            // Park the link on its own run loop so main-thread work cannot delay frames.
+            let thread = Thread { [weak self] in
+                guard let self else { return }
+                link.add(to: .current, forMode: .common)
+                // `run(mode:before:)` in a loop lets the thread exit once the link is torn down.
+                while !Thread.current.isCancelled, self.isRunning {
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25))
+                }
+                link.invalidate()
+            }
+            thread.name = "com.openmouse.display-link"
+            thread.qualityOfService = .userInteractive
+
+            runtime.link = link
+            runtime.thread = thread
+            runtime.source = .displayLink
+            // As with the fallback timer, start only after the complete runtime has been
+            // published. `stop()` is serialized by this same lock and cannot miss the thread.
+            thread.start()
+            return true
         }
-        thread.name = "com.openmouse.display-link"
-        thread.qualityOfService = .userInteractive
-        self.thread = thread
-        thread.start()
     }
 
     func stop() {
-        lock.lock()
-        let link = self.link
-        self.link = nil
-        let timer = fallbackTimer
-        fallbackTimer = nil
-        source = .idle
-        lock.unlock()
-
-        link?.isPaused = true
-        timer?.cancel()
-        thread?.cancel()
-        thread = nil
+        runtime.withValue { runtime in
+            runtime.link?.isPaused = true
+            runtime.fallbackTimer?.cancel()
+            runtime.thread?.cancel()
+            runtime.link = nil
+            runtime.thread = nil
+            runtime.fallbackTimer = nil
+            runtime.source = .idle
+        }
     }
 
     @objc private func handleTick() {
         onTick()
-    }
-
-    /// Headless sessions and odd display configurations can leave `NSScreen.main` nil.
-    /// A timer is worse but far better than silently not scrolling.
-    private func startFallback() {
-        let fps = 120.0
-        let timer = DispatchSource.makeTimerSource(queue: fallbackQueue)
-        timer.schedule(
-            deadline: .now(),
-            repeating: .nanoseconds(Int(1_000_000_000.0 / fps)),
-            leeway: .nanoseconds(0)
-        )
-        timer.setEventHandler { [weak self] in self?.onTick() }
-        lock.lock()
-        fallbackTimer = timer
-        source = .timer
-        lock.unlock()
-        timer.resume()
     }
 }

@@ -80,7 +80,7 @@ macOS 菜单栏小工具，做三件事：
 make app        # 编译 + 组装 .app + 签名 → build/Open Mouse.app
 make run        # 上面这些，然后启动
 make install    # 拷到 /Applications 并启动（登录项注册需要装在这里）
-make test       # 跑 136 项内置自检
+make test       # 跑 143 项内置自检
 make dist       # 打包 zip
 ```
 

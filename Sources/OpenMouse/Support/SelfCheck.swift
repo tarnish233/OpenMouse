@@ -26,6 +26,14 @@ enum SelfCheck {
             reversalDropsMomentum()
             sameDirectionAccumulates()
             rateIsBounded()
+            rejectsNonFiniteTravel()
+        }
+        group("滚动帧源生命周期") {
+            finishRaceKeepsTickerAlive()
+            cancelStopsTickerAndAllowsRestart()
+            lifecycleSnapshotsStayCoherent()
+            animatorRejectsNonFiniteInput()
+            realTickerLifecycleIsCoherent()
         }
         group("应用规则") {
             globalFallback()
@@ -149,6 +157,60 @@ enum SelfCheck {
         }
     }
 
+    /// Deterministic frame source for lifecycle checks. Its state uses the same `Locked`
+    /// convention as production so a check can inspect it without introducing a test-only race.
+    private final class ProbeTicker: ScrollFrameTicker {
+        private struct ProbeState {
+            var running = false
+            var starts = 0
+            var stops = 0
+        }
+
+        private let onTick: () -> Void
+        private let state = Locked(ProbeState())
+
+        init(onTick: @escaping () -> Void) {
+            self.onTick = onTick
+        }
+
+        var activeSource: DisplayLinkTicker.Source {
+            state.withValue { $0.running ? .timer : .idle }
+        }
+
+        var isRunning: Bool {
+            state.withValue { $0.running }
+        }
+
+        var startCount: Int {
+            state.withValue { $0.starts }
+        }
+
+        var stopCount: Int {
+            state.withValue { $0.stops }
+        }
+
+        @discardableResult
+        func start() -> Bool {
+            state.withValue { state in
+                state.running = true
+                state.starts += 1
+            }
+            return true
+        }
+
+        func stop() {
+            state.withValue { state in
+                state.running = false
+                state.stops += 1
+            }
+        }
+
+        func fire() {
+            guard isRunning else { return }
+            onTick()
+        }
+    }
+
     // MARK: Easing
 
     private static func conservesDistance() {
@@ -230,6 +292,239 @@ enum SelfCheck {
             "平滑度上界被裁剪"
         )
         expect(ScrollAxis.rate(forSmoothness: 0.5) == 0.5, "平滑度线性映射到每帧比例")
+    }
+
+    private static func rejectsNonFiniteTravel() {
+        var axis = ScrollAxis()
+        axis.add(.infinity)
+        axis.add(.nan)
+        for _ in 0..<4 { _ = axis.advance(rate: 0.5) }
+        expect(axis.isIdle, "NaN/Inf 不会污染缓动累加器，动画仍能终止")
+
+        let settings = ScrollSettings.default
+        expect(
+            settings.travel(forRawDelta: .infinity) == 0
+                && settings.travel(forRawDelta: -.infinity) == 0
+                && settings.travel(forRawDelta: .nan) == 0,
+            "NaN/Inf 在行程换算入口被丢弃，不会生成非有限位移"
+        )
+    }
+
+    // MARK: Frame-source lifecycle
+
+    /// Reproduces F1's exact ordering: a finish is prepared, a new notch arrives before the
+    /// conditional stop, and the old finish must not tear down the source carrying that notch.
+    private static func finishRaceKeepsTickerAlive() {
+        let tickers = Locked<[ProbeTicker]>([])
+        var injectedNewInput = false
+        var animator: ScrollAnimator!
+        var settings = ScrollSettings.default
+        settings.smoothness = 0
+
+        animator = ScrollAnimator(
+            stats: Locked(EngineStats()),
+            tickerFactory: { onTick in
+                let ticker = ProbeTicker(onTick: onTick)
+                tickers.withValue { $0.append(ticker) }
+                return ticker
+            },
+            beforeFinishCommit: {
+                guard !injectedNewInput else { return }
+                injectedNewInput = true
+                _ = animator.enqueue(
+                    vertical: 0.5,
+                    horizontal: 0,
+                    settings: settings,
+                    target: nil
+                )
+            }
+        )
+
+        let accepted = animator.enqueue(
+            vertical: 0.5,
+            horizontal: 0,
+            settings: settings,
+            target: nil
+        )
+        guard let ticker = tickers.value.first else {
+            expect(false, "结束帧与新输入交错时仍有活着的帧源")
+            return
+        }
+
+        var frames = 0
+        while !injectedNewInput, frames < 500 {
+            ticker.fire()
+            frames += 1
+        }
+
+        expect(
+            accepted && injectedNewInput
+                && tickers.value.count == 1
+                && animator.isRunning
+                && animator.hasLiveFrameSource
+                && ticker.isRunning,
+            "结束帧与新输入交错时复用活帧源，不会被旧 finish 闩死"
+        )
+        animator.cancel()
+    }
+
+    private static func cancelStopsTickerAndAllowsRestart() {
+        let tickers = Locked<[ProbeTicker]>([])
+        let animator = ScrollAnimator(
+            stats: Locked(EngineStats()),
+            tickerFactory: { onTick in
+                let ticker = ProbeTicker(onTick: onTick)
+                tickers.withValue { $0.append(ticker) }
+                return ticker
+            }
+        )
+
+        let firstAccepted = animator.enqueue(
+            vertical: 0.5,
+            horizontal: 0,
+            settings: .default,
+            target: nil
+        )
+        let first = tickers.value.first
+        animator.cancel()
+        let cancelled = !animator.isRunning
+            && !animator.hasLiveFrameSource
+            && animator.frameSource == .idle
+            && first?.stopCount == 1
+
+        let secondAccepted = animator.enqueue(
+            vertical: 0.5,
+            horizontal: 0,
+            settings: .default,
+            target: nil
+        )
+        let restarted = tickers.value.count == 2
+            && tickers.value.last?.isRunning == true
+            && animator.isRunning
+            && animator.hasLiveFrameSource
+
+        expect(
+            firstAccepted && cancelled && secondAccepted && restarted,
+            "cancel 会清掉运行态并拆除帧源，下一格滚动能重新启动"
+        )
+        animator.cancel()
+    }
+
+    private static func lifecycleSnapshotsStayCoherent() {
+        let tickers = Locked<[ProbeTicker]>([])
+        let animator = ScrollAnimator(
+            stats: Locked(EngineStats()),
+            tickerFactory: { onTick in
+                let ticker = ProbeTicker(onTick: onTick)
+                tickers.withValue { $0.append(ticker) }
+                return ticker
+            }
+        )
+
+        let idle = !animator.isRunning
+            && !animator.hasLiveFrameSource
+            && animator.frameSource == .idle
+        _ = animator.enqueue(vertical: 0.5, horizontal: 0, settings: .default, target: nil)
+        let running = animator.isRunning
+            && animator.hasLiveFrameSource
+            && animator.frameSource == .timer
+        animator.cancel()
+        let stopped = !animator.isRunning
+            && !animator.hasLiveFrameSource
+            && animator.frameSource == .idle
+
+        expect(
+            idle && running && stopped,
+            "运行标记、ticker 句柄与诊断帧源始终给出同一份生命周期事实"
+        )
+    }
+
+    private static func animatorRejectsNonFiniteInput() {
+        let tickers = Locked<[ProbeTicker]>([])
+        let animator = ScrollAnimator(
+            stats: Locked(EngineStats()),
+            tickerFactory: { onTick in
+                let ticker = ProbeTicker(onTick: onTick)
+                tickers.withValue { $0.append(ticker) }
+                return ticker
+            }
+        )
+
+        let acceptedNaN = animator.enqueue(
+            vertical: .nan,
+            horizontal: 0,
+            settings: .default,
+            target: nil
+        )
+        let acceptedInfinity = animator.enqueue(
+            vertical: 0,
+            horizontal: .infinity,
+            settings: .default,
+            target: nil
+        )
+        var malformedSettings = ScrollSettings.default
+        malformedSettings.smoothness = .nan
+        let acceptedNaNRate = animator.enqueue(
+            vertical: 1,
+            horizontal: 0,
+            settings: malformedSettings,
+            target: nil
+        )
+        expect(
+            !acceptedNaN && !acceptedInfinity && !acceptedNaNRate
+                && tickers.value.isEmpty
+                && !animator.isRunning
+                && !animator.hasLiveFrameSource,
+            "动画入口拒绝非有限位移且不启动帧源，调用方可安全放行原事件"
+        )
+    }
+
+    /// The four checks above all inject `ProbeTicker`, so none of them execute a single line of
+    /// `DisplayLinkTicker` — the file whose state was just consolidated into one lock. This one
+    /// drives the production frame source directly.
+    ///
+    /// Deliberately not asserted here: that frames actually arrive. Waiting on a real vsync
+    /// callback would make the suite depend on there being a display and on how promptly its
+    /// run loop is serviced, and a check that goes red over SSH is worse than no check.
+    /// What is asserted is the invariant the consolidation exists for — `isRunning` and
+    /// `activeSource` can never disagree about whether a source is live.
+    private static func realTickerLifecycleIsCoherent() {
+        let ticker = DisplayLinkTicker {}
+
+        let idle = !ticker.isRunning && ticker.activeSource == .idle
+
+        // Either source counts as started. A headless session has no screen and degrades to the
+        // timer by design, so pinning `.displayLink` would fail for the documented fallback.
+        let started = ticker.start()
+        let running = ticker.isRunning && ticker.activeSource != .idle
+        // Named in the output on purpose. Which source this machine can actually get is the same
+        // fact `--verbose` surfaces: a diagnostic run that says `timer` explains "smoothing feels
+        // worse than Mos" on the spot, and it also tells you whether this check reached
+        // `screen.displayLink` at all or only the fallback.
+        let observed = ticker.activeSource
+
+        // Starting twice must not leave a second link/timer behind with no handle to stop it.
+        let restarted = ticker.start()
+        let stillRunning = ticker.isRunning && ticker.activeSource != .idle
+
+        ticker.stop()
+        let stopped = !ticker.isRunning && ticker.activeSource == .idle
+        // Stopping twice is reachable: `cancel()` and a finish commit can both land on the same
+        // source, and `deinit` stops again after that.
+        ticker.stop()
+        let stillStopped = !ticker.isRunning && ticker.activeSource == .idle
+
+        // The property F1 was about, one layer down: a stopped source must be startable again,
+        // or the first glide would be the last one.
+        let startedAgain = ticker.start()
+        let runningAgain = ticker.isRunning && ticker.activeSource != .idle
+        ticker.stop()
+
+        expect(
+            idle && started && running && restarted && stillRunning
+                && stopped && stillStopped && startedAgain && runningAgain,
+            "真实帧源的运行标记与诊断来源始终一致，且停掉之后能重新启动（本机取到 \(observed.rawValue)）"
+        )
     }
 
     // MARK: Rules

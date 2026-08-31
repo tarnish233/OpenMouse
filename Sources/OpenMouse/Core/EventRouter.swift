@@ -120,6 +120,9 @@ final class EventRouter {
         if wantsSmoothing {
             let dy = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
             let dx = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+            // A non-finite delta cannot be represented by the easing state. Pass the original
+            // event through untouched rather than swallowing it and poisoning the animator.
+            guard dy.isFinite, dx.isFinite else { return Unmanaged.passUnretained(event) }
             guard dy != 0 || dx != 0 else { return Unmanaged.passUnretained(event) }
             // Same rule as the wheel path: never swallow what we cannot re-deliver.
             guard let target = ScrollEventPoster.target(from: event) else {
@@ -128,12 +131,12 @@ final class EventRouter {
             }
             let signY: Double = settings.reverseVertical ? -1 : 1
             let signX: Double = settings.reverseHorizontal ? -1 : 1
-            animator.enqueue(
+            guard animator.enqueue(
                 vertical: dy * signY,
                 horizontal: dx * signX,
                 settings: settings,
                 target: target
-            )
+            ) else { return Unmanaged.passUnretained(event) }
             return nil
         }
 
@@ -191,6 +194,10 @@ final class EventRouter {
             lineField: .scrollWheelEventDeltaAxis2
         )
 
+        guard rawY.isFinite, rawX.isFinite else {
+            stats.withValue { $0.wheelEventsPassedThrough += 1 }
+            return Unmanaged.passUnretained(event)
+        }
         guard rawY != 0 || rawX != 0 else { return Unmanaged.passUnretained(event) }
 
         let signY: Double = settings.reverseVertical ? -1 : 1
@@ -213,6 +220,10 @@ final class EventRouter {
         let gain = accelerationGain(settings: settings)
         let distanceY = settings.travel(forRawDelta: rawY) * gain * signY
         let distanceX = settings.travel(forRawDelta: rawX) * gain * signX
+        guard distanceY.isFinite, distanceX.isFinite else {
+            stats.withValue { $0.wheelEventsPassedThrough += 1 }
+            return Unmanaged.passUnretained(event)
+        }
 
         // Keep a copy of this event so every frame of the glide is delivered to the process
         // the notch was aimed at, instead of wherever the pointer happens to be later.
@@ -236,17 +247,20 @@ final class EventRouter {
             return Unmanaged.passUnretained(event)
         }
 
+        guard animator.enqueue(
+            vertical: distanceY,
+            horizontal: distanceX,
+            settings: settings,
+            target: target
+        ) else {
+            stats.withValue { $0.wheelEventsPassedThrough += 1 }
+            return Unmanaged.passUnretained(event)
+        }
         stats.withValue {
             $0.wheelEventsSmoothed += 1
             $0.lastTargetPID = Int(target.pid)
             $0.lastRawDeltaSource = Self.rawDeltaSource(of: event)
         }
-        animator.enqueue(
-            vertical: distanceY,
-            horizontal: distanceX,
-            settings: settings,
-            target: target
-        )
         return nil
     }
 

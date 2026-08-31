@@ -1,17 +1,62 @@
-# Open Mouse — 项目上下文
+# CLAUDE.md
 
-macOS 菜单栏鼠标增强工具：滚轮平滑、独立反向、按键与手势映射。纯 `CGEventTap`，无内核扩展、无驱动。SwiftPM 构建（不用 Xcode 工程），AppKit 生命周期 + SwiftUI 设置界面。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 项目
+
+Open Mouse：macOS 菜单栏鼠标增强工具，滚轮平滑、独立反向、按键与手势映射。纯 `CGEventTap`，无内核扩展、无驱动。
+
+SwiftPM 构建（**没有 Xcode 工程**），单一可执行 target，AppKit 生命周期 + `NSHostingView` 装 SwiftUI 设置界面。`Package.swift` 里 `swift-tools-version: 6.0` 但 `.swiftLanguageMode(.v5)`，见下面「约定」。发布在 <https://github.com/tarnish233/OpenMouse>。
 
 ## 命令
 
 ```bash
-make app     # 编译 + 组装 .app + 签名 → build/Open Mouse.app
-make run     # 上面这些，然后启动
-make test    # 跑内置自检（136 项，必须全过）
-make dist    # 打包 zip
+make app      # swift build -c release + 组装 .app + 签名 → build/Open Mouse.app
+make run      # 上面这些，然后 pkill 旧进程并启动
+make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
+make debug    # debug 配置的 .app
+make test     # 内置自检（143 项，必须全过）
+make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
+make clean
+make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
 ```
 
-改完代码**必须**跑 `make test`。这些断言就是为了防止下面每一条被重新弄坏。
+只想快速编译看有没有语法/类型错误：`swift build -c release`（不组装不签名，最快）。
+
+版本号的唯一来源是 `Resources/Info.plist` 的 `CFBundleShortVersionString`，`make dist` 从那里读。
+
+### 跑测试
+
+```bash
+make test                                        # 等价于 swift run -c debug OpenMouse --self-check
+"build/Open Mouse.app/Contents/MacOS/OpenMouse" --self-check   # 对已构建/已安装的包做诊断
+```
+
+返回码即结果，失败会打出哪一条断言挂了。
+
+**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 15 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
+
+### 调试
+
+```bash
+OpenMouse --verbose                  # 事件管线计数实时打到 stderr
+OpenMouse --tab buttons              # 启动即打开指定设置页（scroll/buttons/apps/general）
+OpenMouse --check-update owner/repo   # 走真实网络检查更新并退出
+```
+
+`--verbose` 是判断「到底有没有在工作」最快的手段：`smoothed` 是被吞掉的滚轮格数，`synthesized` 是合成出去的事件数，后者显著大于前者说明插值在跑。`frameSource=timer` 表示没锁上 vsync。
+
+诊断日志走 `Trace`（`os.Logger`，subsystem `com.openmouse.OpenMouse`，category `tap` / `gesture`）：
+
+```bash
+/usr/bin/log show --last 2m --predicate 'subsystem == "com.openmouse.OpenMouse"' --info
+```
+
+**用 `/usr/bin/log` 的全路径**——`log` 在这台机器上被 shell 函数遮蔽了。
+
+### 没有的东西
+
+没有 lint 配置、没有 CI、没有测试 target（原因见下）、没有 `.cursor/rules` 之类的其他规则文件。改完代码**必须**跑 `make test`——那些断言就是为了防止下面每一条被重新弄坏。
 
 ## 硬性约束
 
@@ -27,10 +72,20 @@ make dist    # 打包 zip
 8. **反转方向要翻三个字段**：`DeltaAxis` / `PointDelta` / `FixedPtDelta`。漏一个，读那个字段的应用就朝反方向滚。整数字段用整数存取器，浮点字段用浮点存取器。
 9. **帧源不能用 `NSScreen.main`** —— 对无窗口的菜单栏 App 返回 nil，会静默降级到定时器。要取指针所在的那块屏幕。
 10. **必须处理 `tapDisabledByTimeout`**，收到就 `CGEvent.tapEnable` 重开。不处理的话表现为「用一阵子突然失灵」。
-11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置所有老用户的**全部**配置。
+11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置所有老用户的**全部**配置。目前已覆盖 `ScrollSettings` / `ButtonBinding` / `AppRule` / `UpdateSettings` / `Preferences`；**`KeyCombo` 和 `MouseAction` 还没有，是个已装填的数据丢失陷阱**（改这两个类型会让老配置里的 `.keyStroke` 解码抛错 → 降级成 `.passthrough` → 被 `normalize()` 删掉 → 自动保存写盘，用户所有按键映射静默消失）。见 `docs/code-review-2026-08-31.md` F3。
 12. **动作不能在 tap 回调里同步执行**，一律 `DispatchQueue.main.async`。回调超时会被系统停用 tap。
 13. **不要在 tap 回调里查最前面的应用**（IPC 往返）。缓存 `frontmostBundleID`，靠 `didActivateApplicationNotification` 失效。
-14. **不要用全局键盘 tap 去探测键码**——那会捕获用户的真实输入。要验证按键是否有效，用「注入 + 读系统日志」：`/usr/bin/log show --predicate 'subsystem == "com.apple.dock"'` 之类。注意注入进程必须存活 ~400ms，否则 WindowServer 不会处理队列（这会造成假阴性）。
+14. **不要用全局键盘 tap 去探测键码**——那会捕获用户的真实输入。要验证按键是否有效，用「注入 + 读系统日志」（比如 `/usr/bin/log show --predicate 'subsystem == "com.apple.dock"'`）。注意**注入进程必须存活 ~400ms**，否则 WindowServer 不会处理队列——这会造成假阴性，我因此一次性误判了三个本来有效的按键。
+
+## 代码分布
+
+- `Core/` —— 事件管线与所有系统交互。改行为基本只动这里。
+- `Model/` —— `Settings.swift`（`Preferences` / `MouseAction` / `KeyCombo` 等全部持久化类型，手写 `init(from:)` 的覆盖范围见约束 11）、`ActionKind.swift`（选择器用的扁平枚举 + 分组 + 双向转换）、`SettingsStore.swift`（JSON 持久化 + `ResolvedConfig` 快照）。
+- `UI/` —— SwiftUI 设置页，一个 pane 一个文件。
+- `App/` —— AppKit 生命周期、菜单栏、设置窗口。
+- `Support/` —— `SelfCheck.swift`（断言）、`Trace.swift`（os.Logger）、`Strings.swift`（全部文案）、`Locked.swift`。
+
+**新增一个动作要同时改三处**：`MouseAction`（`Model/Settings.swift`）、`ActionKind`（标题 + 分组 + `init(_:)` + `makeAction(preserving:)`）、`ActionRunner.stroke(for:)`。漏掉最后一处编译不过（见下），漏掉分组会被自检抓住。
 
 ## 结构
 
@@ -58,6 +113,10 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
                     └─▶ SettingsWindowController ──▶ SwiftUI 设置界面
 ```
 
+事件掩码是**按当前配置动态算的**（`MouseEngine.eventMask(for:capturingButtons:)`）：没有生效的按键映射就不订阅按键事件，没有滚动时帧源会被销毁。所以「空闲时零开销」不是说法而是实现约束——加新功能时不要无条件扩大掩码。
+
+配置存 `~/Library/Application Support/OpenMouse/preferences.json`。
+
 ## 滚动：为什么平滑要分两级
 
 只做插值不够顺。一级的指数缓动每帧发剩余距离的固定比例，问题是**第一帧就是最大的一帧**：默认参数下一格滚轮第一帧直接发 `90 × 0.085 ≈ 7.65px`，这个凭空出现的突起就是起手那下「踢脚」。Mos 用 `ScrollFilter` 解决——它的 `polish` 生成 5 元数组但只有下标 0 和 1 会被读，等效递推是 **α = 0.23 的一阶低通，输出滞后一帧**。
@@ -76,7 +135,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 几个特殊路径：
 
-- **⌘⇥ 需要真的按下 ⌘ 键。** App switcher 读的是系统的修饰键状态而不是事件 flags，只设 `maskCommand` 完全没反应（保留 / 释放修饰键两种都试过）。必须先发 ⌘ 键自己的 `flagsChanged`。见 `keyStrokeWithRealModifiers`。
+- **⌘⇥ 需要真的按下 ⌘ 键。** App switcher 读的是系统的修饰键状态而不是事件 flags，只设 `maskCommand` 完全没反应（保留 / 释放修饰键两种都试过）。必须先发 ⌘ 键自己的 `flagsChanged`，见 `keyStrokeWithRealModifiers`。
 - **桌面切换必须节流，这不是冷却。** macOS 把空间切换做成动画，动画期间收到的请求是**丢弃**而不是排队。`SpaceSwitchPacer`：0.12s 间隔（Mos 同值），最多积压 2 步，**反向时丢弃积压**（往回划的人想立刻回去，不是想撤销队列）。
 - **媒体键不是键码**，走 `NSEvent.otherEvent(with: .systemDefined, subtype: 8)` + `NX_KEYTYPE_*` 装在 `data1`。
 - **功能行键码要一个个实测**：`160` = 调度中心、`131` = 启动台、`178` = 控制中心，在 macOS 26.6 上验证有效。`177`（聚焦）与 `176`（听写）实测**已失效**，故意没收入——宁可没有这一项，不要一个选得到但不动的选项。注意 Mos 的标识符 `appExpose` 看名字像「应用程序窗口」，但它界面上写的是「启动台」；名字不是证据，日志才是。
@@ -91,23 +150,31 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 ## 约定
 
-- `.swiftLanguageMode(.v5)`。事件 tap 天生是 C 函数指针回调 + `Unmanaged`，Swift 6 的严格隔离会让这层充满仪式性样板。
+- `.swiftLanguageMode(.v5)`。事件 tap 天生是 C 函数指针回调 + `Unmanaged`，Swift 6 的严格隔离会让这层充满仪式性样板。不要为了「现代化」把它切到 v6。
 - 跨线程共享状态统一走 `Locked`（`OSAllocatedUnfairLock`）：配置快照、动画状态、滤波器、计数器。
 - 界面文案全部集中在 `Strings.swift`，目前只有中文。
 - 设置界面遵循 `macos-settings-ui` skill 的写法（`NSWindowController` + `.fullSizeContentView` + 透明 `Form`）。
-- 诊断日志走 `Trace`（`os.Logger`）。读的时候用 `/usr/bin/log`——`log` 在这台机器上被 shell 函数遮蔽了。
 - 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询。
+- 注释写「为什么」，尤其是那些看起来可以简化但不能简化的地方——这个项目里大部分坑都长得像多余的代码。
 
 ## 测试为什么是 `--self-check`
 
-XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有——只装 CLT 的机器连测试 target 都编译不出来。所以断言放在 app target 内，`OpenMouse --self-check` 跑，任何能构建的机器都能跑，对已发布的构建也是可用的诊断。装了完整 Xcode 之后搬进 `@Test` 是机械改写。
+XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有——只装 CLT 的机器连测试 target 都编译不出来。所以断言放在 app target 内，任何能构建的机器都能跑，对已发布的构建也是可用的诊断。装了完整 Xcode 之后搬进 `@Test` 是机械改写。
 
-自检里「Mos 手感对齐」那组把 `33.6`、`2.70`、`1 - √(4.35/5.2)`、`0.23` 钉住了，参数被误改立刻失败。**上面每条约束都对应一条断言——修 bug 之后要补一条，别让同一个 bug 回来第二次。**
+自检里「Mos 手感对齐」那组把 `33.6`、`2.70`、`1 - √(4.35/5.2)`、`0.23` 钉住了，参数被误改立刻失败。「动作实现完整性」那组保证 64 个动作都有实现、且没有两个动作发出完全相同的按键——不过后半句是在**键码解析之前**比较的，所以看不见多个 `.character` 动作在解析失败时塌到同一个键上。
+
+**修 bug 之后要补一条断言，别让同一个 bug 回来第二次。** 但**不要以为约束已经都被钉住了**：约束 1 / 2 / 3 / 4 / 13 有断言，约束 **6 / 7 / 8 / 9 / 10 / 12 零覆盖**，约束 5 的断言是同义反复的（`hasFallbackForEveryCharacter` 钉的是兜底表里已经有的那 9 个字符，等于「这张表等于它自己」），约束 11 只覆盖到 `Preferences` 层，约束 14 是流程约束、本质上无法断言。「滚动帧源生命周期」那组会驱动真实的 `DisplayLinkTicker`，但只钉生命周期一致性——**选哪块屏幕**（约束 9 本身）仍然没有断言，也刻意不断言「帧真的会来」，那要依赖有显示器，红在 SSH 上比没有这条更糟。
+
+约束 8 零覆盖直接导致了 `flipAxes` 用错存取器；约束 5 的同义反复直接导致了键码兜底返回一个真键。详见 `docs/code-review-2026-08-31.md` §4。
 
 ## 参考实现
 
-`~/workspace/Mos` 有 Mos 源码（我 fork 的分支 `codex/mouse-gesture-navigation`，PR Caldis/Mos#1023 是我加的手势识别）。**鼠标行为的事实来源是那份源码，不要凭记忆。** 手感参数与交互模式照抄成熟工具，不要自己发明数值。
+`~/workspace/Mos` 有 Mos 源码（fork 的分支 `codex/mouse-gesture-navigation`，PR Caldis/Mos#1023 是加的手势识别）。**鼠标行为的事实来源是那份源码，不要凭记忆。** 手感参数与交互模式照抄成熟工具，不要自己发明数值。
 
 ## 签名与权限
 
-TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。构建脚本按证书**哈希**而不是名字挑证书（钥匙串里常有多张同名证书，用名字会让 `codesign` 报 ambiguous）。固定签名身份时授权能扛过反复重新构建，但**刚重新签名后的第一次启动**可能短暂读不到授权——下次启动就恢复。所以不要在构建已是最新时重新签名。彻底重来用 `make tcc-reset`。
+TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。`Scripts/bundle.sh` 按证书**哈希**而不是名字挑证书（钥匙串里常有多张同名证书，用名字会让 `codesign` 报 ambiguous）。固定签名身份时授权能扛过反复重新构建，但**刚重新签名后的第一次启动**可能短暂读不到授权——下次启动就恢复。所以不要在构建已是最新时重新签名。彻底重来用 `make tcc-reset`。
+
+## git
+
+这台机器上 `git push` 到 GitHub 会挂两分钟然后报 `RPC failed; HTTP 408`（HTTP/2 的大 POST 被中断，**不是**在等密码）。仓库的 `.git/config` 已经写了 `http.version=HTTP/1.1` 和 `http.postBuffer=524288000`。调试推送问题时带 `GIT_TERMINAL_PROMPT=0`，让它快速失败而不是挂住。`gh` 也会偶发 `unexpected EOF`，重试前先检查有没有留下未完成的草稿 release。

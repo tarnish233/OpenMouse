@@ -54,9 +54,11 @@ struct ScrollSettings: Codable, Equatable, Sendable {
     /// Travel contributed by one scroll event whose raw pixel delta was `rawDelta`.
     /// Mirrors Mos: floor the magnitude at `minimumStep`, then apply the gain.
     func travel(forRawDelta rawDelta: Double) -> Double {
-        guard rawDelta != 0 else { return 0 }
+        guard rawDelta.isFinite, rawDelta != 0,
+              minimumStep.isFinite, speed.isFinite else { return 0 }
         let floored = max(abs(rawDelta), minimumStep)
-        return (rawDelta < 0 ? -floored : floored) * speed
+        let travel = (rawDelta < 0 ? -floored : floored) * speed
+        return travel.isFinite ? travel : 0
     }
 
     var clamped: ScrollSettings {
