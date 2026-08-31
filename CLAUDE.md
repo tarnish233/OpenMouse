@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检（195 项，必须全过）
+make test     # 内置自检（197 项，必须全过）
 make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -146,7 +146,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 **不能只读增量字段。** 某些鼠标发的 `otherMouseDragged` 三个增量字段全是 0，只读它们的话累积位移永远是 0，每次按住都被判成「原地单击」。识别器用事件坐标做差分，增量字段非零时才优先采信（屏幕边缘会夹住坐标，那时差分为 0 而增量字段仍然对）。
 
-阈值：40px 才算划动，某轴要比另一轴多 1.2 倍（避免斜划乱猜），≤10px 算原地单击。**一次按住只触发一个动作**，否则一次长划反复越过阈值会跳三个桌面。横向刻意反向（左划 = 切到右边的桌面），与触控板同向。
+阈值：40px 才算划动，某轴要比另一轴多 1.2 倍（避免斜划乱猜）。**一次按住只触发一个动作**，否则一次长划反复越过阈值会跳三个桌面。未形成主轴方向的输入（短移动、斜划、往返手抖）在抬起时统一回落为单击，不能落入「方向和单击都不是」的死区。横向刻意反向（左划 = 切到右边的桌面），与触控板同向。
 
 **被吞掉的按下拥有它的抬起。** `EventRouter` 在 mouse-down 时记录 claim；mouse-up 只按这份会话状态收尾，不能重新解析当时的修饰键、绑定或前台应用。任何 tap 重建、权限丢失、引擎关闭与自动恢复都必须经统一 teardown 清掉 claim、gesture session、motion tap 和权限轮询。
 

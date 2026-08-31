@@ -22,6 +22,11 @@ enum MouseGestureDirection: String, Equatable, Sendable {
     }
 }
 
+enum MouseGestureCompletion: Equatable {
+    case direction(MouseGestureDirection)
+    case click
+}
+
 /// Four-direction recognizer for the gesture-navigation binding.
 ///
 /// One button hold is one gesture transaction: as soon as a direction commits, the rest of
@@ -31,13 +36,10 @@ enum MouseGestureDirection: String, Equatable, Sendable {
 struct MouseGestureRecognizer {
     /// How far the pointer must travel before a direction is committed.
     static let defaultActivationDistance: Double = 40
-    /// Movement below this counts as "did not move", so the hold is treated as a click.
-    static let defaultClickTolerance: Double = 10
     /// One axis must beat the other by this factor, so diagonal drift does not pick for you.
     static let defaultDominanceRatio: Double = 1.2
 
     private let activationDistance: Double
-    private let clickTolerance: Double
     private let dominanceRatio: Double
 
     private(set) var displacement = CGPoint.zero
@@ -49,11 +51,9 @@ struct MouseGestureRecognizer {
 
     init(
         activationDistance: Double = defaultActivationDistance,
-        clickTolerance: Double = defaultClickTolerance,
         dominanceRatio: Double = defaultDominanceRatio
     ) {
         self.activationDistance = activationDistance
-        self.clickTolerance = clickTolerance
         self.dominanceRatio = dominanceRatio
     }
 
@@ -120,9 +120,12 @@ struct MouseGestureRecognizer {
         return nil
     }
 
-    /// A hold that never really moved is a plain click. Logi Options+ maps that to Mission
-    /// Control, so the gesture button is useful without moving the mouse at all.
-    var shouldTreatAsClick: Bool {
-        recognized == nil && maximumDistanceFromOrigin <= clickTolerance
+    /// Every swallowed hold has an exhaustive result. A clear dominant-axis swipe commits
+    /// while moving; everything else becomes the button's click action on release. Keeping
+    /// this as the exact complement avoids a dead zone where neither path owns the gesture.
+    var completion: MouseGestureCompletion {
+        recognized.map(MouseGestureCompletion.direction) ?? .click
     }
+
+    var shouldTreatAsClick: Bool { completion == .click }
 }

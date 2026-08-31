@@ -796,15 +796,24 @@ enum SelfCheck {
     private static func treatsStillHoldAsClick() {
         var still = MouseGestureRecognizer()
         _ = still.append(deltaX: 2, deltaY: -3)
-        expect(still.shouldTreatAsClick, "几乎没动的按住算作单击")
+        expect(still.completion == .click, "几乎没动的按住算作单击")
 
         var moved = MouseGestureRecognizer()
         _ = moved.append(deltaX: 0, deltaY: -50)
-        expect(!moved.shouldTreatAsClick, "已经识别出方向就不再算单击")
+        expect(moved.completion == .direction(.up), "已经识别出的方向不会在抬起时再变成单击")
 
-        var wandered = MouseGestureRecognizer()
-        _ = wandered.append(deltaX: 25, deltaY: 0)
-        expect(!wandered.shouldTreatAsClick, "移动超过容差但没到阈值，也不算单击")
+        var deadZone = MouseGestureRecognizer()
+        _ = deadZone.append(deltaX: 25, deltaY: 0)
+        expect(deadZone.completion == .click, "25px 未越过方向阈值时明确回落为单击")
+
+        var diagonal = MouseGestureRecognizer()
+        _ = diagonal.append(deltaX: 300, deltaY: 300)
+        expect(diagonal.completion == .click, "长距离 45° 斜划不乱猜方向，并在抬起时回落为单击")
+
+        var roundTrip = MouseGestureRecognizer()
+        _ = roundTrip.append(deltaX: 11, deltaY: 0)
+        _ = roundTrip.append(deltaX: -11, deltaY: 0)
+        expect(roundTrip.completion == .click, "11px 往返手抖也有确定的单击结果")
     }
 
     private static func mapsDirectionsLikeLogiOptions() {
