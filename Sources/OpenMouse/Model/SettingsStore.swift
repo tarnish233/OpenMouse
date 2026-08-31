@@ -110,22 +110,16 @@ final class SettingsStore {
 
     private func scheduleSave() {
         saveTask?.cancel()
-        saveTask = Task { [preferences, fileURL] in
-            // Sliders fire continuously; coalesce writes.
-            try? await Task.sleep(for: .milliseconds(400))
-            guard !Task.isCancelled else { return }
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(preferences) else { return }
+        let preferences = preferences
+        let fileURL = fileURL
+        saveTask = PreferencesSaveWorker.schedule(preferences: preferences) { data in
             try? data.write(to: fileURL, options: .atomic)
         }
     }
 
     func saveNow() {
         saveTask?.cancel()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(preferences) else { return }
+        guard let data = PreferencesSaveWorker.encodedData(for: preferences) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
 

@@ -77,6 +77,18 @@ enum UpdateChecker {
         )
     }
 
+    static let requestTimeout: TimeInterval = 15
+    static let resourceTimeout: TimeInterval = 30
+
+    static func sessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = requestTimeout
+        // Unlike the per-request idle timeout, this caps the whole response lifetime, so a
+        // server that trickles bytes cannot keep UpdateCoordinator.isChecking latched forever.
+        configuration.timeoutIntervalForResource = resourceTimeout
+        return configuration
+    }
+
     static func check(repository: String, currentVersion: String) async -> Outcome {
         let repo = repository.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !repo.isEmpty, repo.contains("/") else { return .notConfigured }
@@ -85,13 +97,15 @@ enum UpdateChecker {
         }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        request.timeoutInterval = requestTimeout
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         // GitHub rejects unidentified clients on some paths.
         request.setValue("OpenMouse/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
+        let session = URLSession(configuration: sessionConfiguration())
+        defer { session.invalidateAndCancel() }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .failed("无法解析服务器响应")
             }

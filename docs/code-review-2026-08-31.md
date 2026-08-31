@@ -583,11 +583,13 @@ return .stroke(Stroke(keyCode: UInt16(keyCode), flags: CGEventFlags(rawValue: UI
 
 | # | 位置 | 扫描结论 |
 |---|---|---|
-| C5 | `Core/UpdateChecker.swift:80` | 仅在空闲时超时 + `isChecking` 守卫，可能把整个进程的更新检查卡死 |
+| C5 | `Core/UpdateChecker.swift:80` | **已确认并修复**：增加 30 秒 resource 总时限，滴流响应不能永久锁住 `isChecking` |
 | C6 | `Core/MouseEngine.swift:116` | 每次偏好变更都销毁并重建 tap（拖滑块时约 60 次/秒），期间有事件绕过 App 的窗口；`.failed` 是终态且无重试 |
-| C7 | `Model/SettingsStore.swift:87` | 去抖保存在 tap 所在的 run loop 上**同步**编码并写盘 |
+| C7 | `Model/SettingsStore.swift:87` | **已确认并修复**：去抖编码/写盘移到 detached utility task |
 | C8 | `App/StatusItemController.swift:22` / `:159` | 状态变化时不调 `refreshIcon()`；已存在 `.custom` 规则时「停用当前应用」菜单项静默无效 |
 | C9 | `UI/AppRulesPane.swift:76` | 自定义规则只暴露了 10 个滚动字段中的 5 个 |
+
+**C5 / C7 复核结果**：两条都真实。`URLRequest.timeoutInterval` 只提供请求空闲超时，持续滴流仍可能长期占住一次 `data(for:)`，而 coordinator 的 `isChecking` 会阻止后续所有检查；现改用独立 ephemeral session，并同时设置 15 秒 request timeout 与 30 秒 resource 总时限。偏好保存的 `Task` 原先继承 `SettingsStore` 的 MainActor，sleep 后的 JSON 编码和原子写盘确实仍在主线程；现由 `PreferencesSaveWorker.schedule` 创建 detached utility task。自检增加 5 项：两条超时配置、后台执行、有限完成和编码快照完整性。总计 220 项。
 
 **整理类（非缺陷）**：界面文案有散落在 `Strings.swift` 之外的；Status→标签的 switch 重复了两处且颜色已经不一致；`ConflictMonitor` 每次应用切换都做一遍全量进程扫描；tap 回调里有每事件分配（`Array(gestureSessions.keys)`、`"\(action)"` 插值）。
 

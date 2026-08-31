@@ -105,6 +105,7 @@ enum SelfCheck {
             sortsBindings()
             toleratesBrokenSections()
             preservesBindingsAcrossSchemaChanges()
+            debouncedSaveLeavesMainRunLoop()
             survivesJSONRoundTrip()
         }
         group("Mos 手感对齐") {
@@ -147,6 +148,7 @@ enum SelfCheck {
             hasDefaultUpdateSource()
             comparesVersions()
             automaticScheduleUsesWallClock()
+            updateRequestHasHardResourceDeadline()
             skippedReleaseIsFiltered()
             parsesRelease()
             rejectsBadPayload()
@@ -1131,6 +1133,23 @@ enum SelfCheck {
         )
     }
 
+    private static func debouncedSaveLeavesMainRunLoop() {
+        var prefs = Preferences()
+        prefs.scroll.speed = 4.2
+        let result = Locked<(completedOffMain: Bool?, decoded: Preferences?)>((nil, nil))
+        let semaphore = DispatchSemaphore(value: 0)
+        let task = PreferencesSaveWorker.schedule(preferences: prefs, delay: .zero) { data in
+            result.value = (!Thread.isMainThread, try? JSONDecoder().decode(Preferences.self, from: data))
+            semaphore.signal()
+        }
+        let completed = semaphore.wait(timeout: .now() + 2) == .success
+        task.cancel()
+
+        expect(completed, "去抖保存任务会在有限时间内完成")
+        expect(result.value.completedOffMain == true, "JSON 编码与写入闭包不占用主线程/事件 tap run loop")
+        expect(result.value.decoded?.scroll.speed == 4.2, "后台编码保存完整偏好快照")
+    }
+
     private static func matchesMosFeel() {
         let defaults = ScrollSettings.default
         expect(defaults.minimumStep == 33.6, "最短步长对齐 Mos 的 33.6")
@@ -1799,6 +1818,18 @@ enum SelfCheck {
             UpdatePolicy.dueDate(lastCheckedAt: now.timeIntervalSince1970, now: now)
                 == now.addingTimeInterval(UpdatePolicy.automaticInterval),
             "下一次唤醒按持久化检查时间安排，而不是只在启动时咨询一次"
+        )
+    }
+
+    private static func updateRequestHasHardResourceDeadline() {
+        let configuration = UpdateChecker.sessionConfiguration()
+        expect(
+            configuration.timeoutIntervalForRequest == UpdateChecker.requestTimeout,
+            "更新请求保留 15 秒空闲超时"
+        )
+        expect(
+            configuration.timeoutIntervalForResource == UpdateChecker.resourceTimeout,
+            "更新响应有 30 秒总时限，持续滴流也不能永久卡住 isChecking"
         )
     }
 
