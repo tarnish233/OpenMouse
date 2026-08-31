@@ -586,12 +586,14 @@ return .stroke(Stroke(keyCode: UInt16(keyCode), flags: CGEventFlags(rawValue: UI
 | C5 | `Core/UpdateChecker.swift:80` | **已确认并修复**：增加 30 秒 resource 总时限，滴流响应不能永久锁住 `isChecking` |
 | C6 | `Core/MouseEngine.swift:116` | **已确认并修复**：事件掩码不变时复用主 tap，创建失败安排重试而不是停在终态 |
 | C7 | `Model/SettingsStore.swift:87` | **已确认并修复**：去抖编码/写盘移到 detached utility task |
-| C8 | `App/StatusItemController.swift:22` / `:159` | 状态变化时不调 `refreshIcon()`；已存在 `.custom` 规则时「停用当前应用」菜单项静默无效 |
+| C8 | `App/StatusItemController.swift:22` / `:159` | **已确认并修复**：持续观察总开关与引擎状态刷新图标；已有 `.custom` 规则可切换为 bypass |
 | C9 | `UI/AppRulesPane.swift:76` | 自定义规则只暴露了 10 个滚动字段中的 5 个 |
 
 **C5 / C7 复核结果**：两条都真实。`URLRequest.timeoutInterval` 只提供请求空闲超时，持续滴流仍可能长期占住一次 `data(for:)`，而 coordinator 的 `isChecking` 会阻止后续所有检查；现改用独立 ephemeral session，并同时设置 15 秒 request timeout 与 30 秒 resource 总时限。偏好保存的 `Task` 原先继承 `SettingsStore` 的 MainActor，sleep 后的 JSON 编码和原子写盘确实仍在主线程；现由 `PreferencesSaveWorker.schedule` 创建 detached utility task。自检增加 5 项：两条超时配置、后台执行、有限完成和编码快照完整性。总计 220 项。
 
 **C6 复核结果**：结论真实。偏好观察会在滚动滑块、应用规则等任意字段变化时进入 `apply`，旧实现无条件替换主 tap 的 run-loop source，并同步取消按键/手势会话；连续拖动设置会制造事件监听空窗和手势中断。现缓存已订阅的事件掩码：掩码未变只更新锁保护的配置快照和按键绑定，掩码变化才重建；主 tap 创建失败会安排 1 秒后重试，成功或离开运行条件时统一取消。自检增加 4 项，覆盖滚动参数变化不重启主 tap、不打断活动手势、失败会安排重试和重试成功后收敛。总计 224 项。
+
+**C8 复核结果**：两部分都真实。状态栏控制器在引擎启动前创建，旧代码只在初始化和点击总开关时刷新，因此启动成功、权限丢失/恢复和 tap 失败都不会改变图标；现用 Observation 持续跟踪总开关与 `MouseEngine.status`，每次变化都重新投影并订阅。菜单原先用 `SettingsStore.addRule` 创建 bypass，而该方法会拒绝已有 bundle id，导致 `.custom` 规则静默无效；现把切换收口为 `Preferences.toggleBypassRule`，custom 会就地变为 bypass，再次启用则移除规则。自检增加 5 项，覆盖三条规则切换路径和两种图标状态。总计 229 项。
 
 **整理类（非缺陷）**：界面文案有散落在 `Strings.swift` 之外的；Status→标签的 switch 重复了两处且颜色已经不一致；`ConflictMonitor` 每次应用切换都做一遍全量进程扫描；tap 回调里有每事件分配（`Array(gestureSessions.keys)`、`"\(action)"` 插值）。
 

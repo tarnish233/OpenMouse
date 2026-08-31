@@ -66,6 +66,7 @@ enum SelfCheck {
             customRule()
             masterSwitchWins()
             scrollRulesFollowEventTarget()
+            statusMenuTogglesBypassRule()
         }
         group("按键映射") {
             defaultAction()
@@ -97,6 +98,7 @@ enum SelfCheck {
         group("应用元数据与生命周期") {
             activationLeaseIsIdempotent()
             versionFallbackIsHonest()
+            statusItemPresentationTracksRuntimeState()
         }
         group("偏好设置") {
             clampsOutOfRange()
@@ -583,6 +585,31 @@ enum SelfCheck {
         expect(config.active && config.scroll.speed == 7.7 && config.buttonsActive, "没有规则时使用全局设置")
     }
 
+    private static func statusMenuTogglesBypassRule() {
+        var prefs = Preferences()
+        prefs.scroll.speed = 7.25
+        var custom = AppRule(bundleID: "com.example.Editor", name: "Editor", mode: .custom)
+        custom.scroll.reverseHorizontal = true
+        prefs.rules = [custom]
+
+        prefs.toggleBypassRule(bundleID: custom.bundleID, name: custom.name)
+        expect(
+            prefs.rules.count == 1 && prefs.rules[0].id == custom.id
+                && prefs.rules[0].mode == .bypass && prefs.rules[0].scroll.reverseHorizontal,
+            "状态菜单会把已有 custom 规则切成 bypass，而不是被重复规则保护静默忽略"
+        )
+
+        prefs.toggleBypassRule(bundleID: custom.bundleID, name: custom.name)
+        expect(prefs.rules.isEmpty, "再次启用应用会移除 bypass 规则并恢复全局行为")
+
+        prefs.toggleBypassRule(bundleID: "com.example.New", name: "New")
+        expect(
+            prefs.rules.count == 1 && prefs.rules[0].mode == .bypass
+                && prefs.rules[0].scroll.speed == prefs.scroll.speed,
+            "没有既有规则时状态菜单会创建继承全局滚动参数的 bypass 规则"
+        )
+    }
+
     private static func bypassRule() {
         var prefs = Preferences()
         prefs.rules = [AppRule(bundleID: "com.apple.Terminal", name: "Terminal", mode: .bypass)]
@@ -1009,6 +1036,21 @@ enum SelfCheck {
             AppVersion.value("CFBundleShortVersionString", in: ["CFBundleShortVersionString": "2.3.4"])
                 == "2.3.4",
             "应用版本只取自 Info.plist 提供的值"
+        )
+    }
+
+    private static func statusItemPresentationTracksRuntimeState() {
+        expect(
+            StatusItemPresentation(preferencesEnabled: true, engineRunning: true)
+                == StatusItemPresentation(symbolName: "computermouse.fill", appearsDisabled: false),
+            "总开关和引擎都运行时状态栏显示实心启用图标"
+        )
+        expect(
+            StatusItemPresentation(preferencesEnabled: true, engineRunning: false)
+                == StatusItemPresentation(symbolName: "computermouse", appearsDisabled: true)
+                && StatusItemPresentation(preferencesEnabled: false, engineRunning: true)
+                == StatusItemPresentation(symbolName: "computermouse", appearsDisabled: true),
+            "引擎状态或总开关任一关闭时状态栏立即显示停用图标"
         )
     }
 

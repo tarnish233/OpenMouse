@@ -451,6 +451,24 @@ struct Preferences: Codable, Equatable, Sendable {
 
     init() {}
 
+    /// Toggle the status-menu meaning of “disable for this app”. An existing custom rule
+    /// must become bypass rather than being ignored by the duplicate-rule guard; toggling
+    /// again removes the bypass so the app returns to the global defaults.
+    mutating func toggleBypassRule(bundleID: String, name: String) {
+        if let index = rules.firstIndex(where: { $0.bundleID == bundleID }) {
+            if rules[index].mode == .bypass {
+                rules.remove(at: index)
+            } else {
+                rules[index].mode = .bypass
+            }
+            return
+        }
+
+        var rule = AppRule(bundleID: bundleID, name: name)
+        rule.scroll = scroll
+        rules.append(rule)
+    }
+
     mutating func normalize() {
         scroll = scroll.clamped
         for index in rules.indices {

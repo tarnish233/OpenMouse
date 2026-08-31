@@ -1,4 +1,24 @@
 import AppKit
+import Observation
+
+/// The menu-bar icon is a projection of two independently observable values. Keeping the
+/// projection pure lets self-checks pin the exact disabled/running presentation without
+/// constructing an `NSStatusItem`.
+struct StatusItemPresentation: Equatable {
+    let symbolName: String
+    let appearsDisabled: Bool
+
+    init(symbolName: String, appearsDisabled: Bool) {
+        self.symbolName = symbolName
+        self.appearsDisabled = appearsDisabled
+    }
+
+    init(preferencesEnabled: Bool, engineRunning: Bool) {
+        let active = preferencesEnabled && engineRunning
+        symbolName = active ? "computermouse.fill" : "computermouse"
+        appearsDisabled = !active
+    }
+}
 
 /// Menu bar entry point. The menu is rebuilt on open so the check marks always reflect the
 /// live preferences, even when they were changed from the settings window.
@@ -16,17 +36,32 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
-        refreshIcon()
+        observeIconState()
     }
 
-    private func refreshIcon() {
+    private func observeIconState() {
+        let presentation = withObservationTracking {
+            StatusItemPresentation(
+                preferencesEnabled: store.preferences.enabled,
+                engineRunning: MouseEngine.shared.status.isRunning
+            )
+        } onChange: {
+            Task { @MainActor [weak self] in
+                self?.observeIconState()
+            }
+        }
+        refreshIcon(using: presentation)
+    }
+
+    private func refreshIcon(using presentation: StatusItemPresentation) {
         guard let button = item.button else { return }
-        let enabled = store.preferences.enabled && MouseEngine.shared.status.isRunning
-        let name = enabled ? "computermouse.fill" : "computermouse"
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: Strings.appName)
+        let image = NSImage(
+            systemSymbolName: presentation.symbolName,
+            accessibilityDescription: Strings.appName
+        )
         image?.isTemplate = true
         button.image = image
-        button.appearsDisabled = !enabled
+        button.appearsDisabled = presentation.appearsDisabled
     }
 
     // MARK: NSMenuDelegate
@@ -139,7 +174,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func toggleEnabled() {
         store.preferences.enabled.toggle()
-        refreshIcon()
     }
 
     @objc private func toggleSmoothing() {
@@ -152,12 +186,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func toggleFrontmostApp() {
         guard let bundleID = store.frontmostBundleID else { return }
-        if let index = store.preferences.rules.firstIndex(where: { $0.bundleID == bundleID && $0.mode == .bypass }) {
-            store.preferences.rules.remove(at: index)
-        } else {
-            let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? bundleID
-            store.addRule(bundleID: bundleID, name: name)
-        }
+        let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? bundleID
+        store.preferences.toggleBypassRule(bundleID: bundleID, name: name)
     }
 
     @objc private func openSettings() {
