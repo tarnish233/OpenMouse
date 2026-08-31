@@ -39,6 +39,61 @@ enum SelfCheck {
         }
     }
 
+    private final class ProbeGestureOutput: GestureNavigationOutput {
+        struct Begin: Equatable {
+            var button: Int
+            var axis: MouseGestureAxis
+            var pixelDelta: Double
+            var location: CGPoint
+            var canFreezePointer: Bool
+        }
+
+        var supportsInteractiveNavigation: Bool
+        var beginSucceeds = true
+        private(set) var begins: [Begin] = []
+        private(set) var changes: [(button: Int, pixelDelta: Double)] = []
+        private(set) var pointerMovementButtons: [Int] = []
+        private(set) var ends: [(button: Int, cancelled: Bool)] = []
+        private(set) var cancelAllCount = 0
+
+        init(supportsInteractiveNavigation: Bool = true) {
+            self.supportsInteractiveNavigation = supportsInteractiveNavigation
+        }
+
+        func begin(
+            button: Int,
+            axis: MouseGestureAxis,
+            initialPixelDelta: Double,
+            location: CGPoint,
+            canFreezePointer: Bool
+        ) -> Bool {
+            begins.append(Begin(
+                button: button,
+                axis: axis,
+                pixelDelta: initialPixelDelta,
+                location: location,
+                canFreezePointer: canFreezePointer
+            ))
+            return beginSucceeds
+        }
+
+        func change(button: Int, pixelDelta: Double) {
+            changes.append((button, pixelDelta))
+        }
+
+        func allowPointerMovement(button: Int) {
+            pointerMovementButtons.append(button)
+        }
+
+        func end(button: Int, cancelled: Bool) {
+            ends.append((button, cancelled))
+        }
+
+        func cancelAll() {
+            cancelAllCount += 1
+        }
+    }
+
     static func run() -> Bool {
         failures = []
         checks = 0
@@ -76,14 +131,25 @@ enum SelfCheck {
             motionMaskCoversPlainMovement()
             buttonReleaseUsesPressClaim()
         }
+        group("Logi HID++") {
+            hidppEncodesDivertWithoutRemapping()
+            hidppDecodesPhysicalHoldSet()
+            hidppHoldOutlivesMomentaryNativeMouseUp()
+        }
         group("手势导航") {
             commitsDominantAxis()
             ignoresDiagonalDrift()
-            firesOncePerHold()
+            keepsAxisLockedAfterFirstDirection()
             treatsStillHoldAsClick()
             mapsDirectionsLikeLogiOptions()
             measuresFromLocationWhenDeltasAreEmpty()
             prefersDeltaFieldsWhenPresent()
+            routesGestureLikeLogiOptions()
+            dockSwipeProgressFollowsReversal()
+            dockSwipeCancelsContradictoryExit()
+            dockSwipeCommitsShortFastFlick()
+            staleDockSwipeEndCannotCancelReversal()
+            dockSwipeEncoderCarriesRequiredFields()
         }
         group("动作选择器") {
             actionKindRoundTrip()
@@ -145,6 +211,7 @@ enum SelfCheck {
         }
         group("系统快捷键") {
             windowManagementStrokesCarryFn()
+            gestureSpaceStrokeMatchesLogiTrace()
             rejectsInvalidSystemHotkeyNumbers()
         }
         group("更新检查") {
@@ -793,7 +860,7 @@ enum SelfCheck {
         let modifier = CGEventFlags.maskCommand.rawValue
         let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
         var fired: [MouseAction] = []
-        let router = EventRouter(config: snapshot) { fired.append($0) }
+        let router = EventRouter(config: snapshot, runAction: { fired.append($0) })
         router.updateBindings([
             ButtonBinding(button: 4, modifiers: modifier, action: .gestureNavigation)
         ])
@@ -833,6 +900,87 @@ enum SelfCheck {
         expect(fired == [.missionControl], "静止手势仍按按下时动作解释为单击")
     }
 
+    private static func hidppEncodesDivertWithoutRemapping() {
+        expect(
+            LogitechHIDPPProtocol.reportingParameters(cid: 0x0056, divert: true)
+                == [0x00, 0x56, 0x03, 0x00, 0x00],
+            "SetControlReporting 只设置 divert+valid，不改写 Forward 的 target CID"
+        )
+        expect(
+            LogitechHIDPPProtocol.reportingParameters(cid: 0x0056, divert: false)
+                == [0x00, 0x56, 0x02, 0x00, 0x00],
+            "解除接管时保留 valid 位并清除 divert 值"
+        )
+    }
+
+    private static func hidppDecodesPhysicalHoldSet() {
+        let held: [UInt8] = [
+            0x11, 0xFF, 0x42, 0x00,
+            0x00, 0x56, 0x00, 0xC3, 0x00, 0x00
+        ]
+        expect(
+            LogitechHIDPPProtocol.activeButtons(
+                in: held,
+                ownedCIDs: [0x0056, 0x00C3]
+            ) == [4],
+            "HID++ 活跃 CID 集合聚合为一个物理 Forward/手势按钮按住状态"
+        )
+        expect(
+            LogitechHIDPPProtocol.activeButtons(
+                in: [0x11, 0xFF, 0x42, 0x00, 0x00, 0x00],
+                ownedCIDs: [0x0056]
+            ).isEmpty,
+            "HID++ 空活跃集合明确表示物理按钮已抬起"
+        )
+    }
+
+    /// The M750 L native Forward stream was observed ending 4–24 ms after down even while the
+    /// user was still holding it. Once HID++ owns that control, the native up must not tear down
+    /// the gesture; only the physical-state HID++ release may do so.
+    private static func hidppHoldOutlivesMomentaryNativeMouseUp() {
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var gestureActions: [MouseAction] = []
+        let router = EventRouter(
+            config: snapshot,
+            runGestureAction: { gestureActions.append($0) },
+            runAction: { _ in }
+        )
+        router.updateBindings([ButtonBinding(button: 4, action: .gestureNavigation)])
+        router.updateHIDPPOwnedButtons([4])
+        router.handleHIDPPButton(button: 4, isDown: true)
+
+        guard let nativeUp = mouseButtonEvent(
+            type: .otherMouseUp,
+            button: 4,
+            modifiers: 0,
+            location: CGPoint(x: 100, y: 100)
+        ), let motion = mouseMotionEvent(
+            location: CGPoint(x: 112, y: 100),
+            deltaX: 12,
+            deltaY: 0
+        ) else {
+            expect(false, "可构造 HID++ 手势的原生伪抬起和后续位移")
+            return
+        }
+
+        expect(
+            router.handleButton(type: .otherMouseUp, event: nativeUp) == nil
+                && router.activeGestureSessionCount == 1,
+            "HID++ 已接管时忽略 M750 L 的瞬时原生 mouse-up，保持手势会话"
+        )
+        _ = router.handleMotion(motion)
+        expect(
+            gestureActions == [.spaceLeft],
+            "原生伪抬起后继续接收位移，并按 Logi 模型触发一次离散桌面动作"
+        )
+        router.handleHIDPPButton(button: 4, isDown: false)
+        expect(
+            router.activeButtonClaimCount == 0
+                && router.activeGestureSessionCount == 0,
+            "只有 HID++ 物理 release 才结束已接管的手势会话"
+        )
+    }
+
     private static func mouseButtonEvent(
         type: CGEventType,
         button: Int,
@@ -858,14 +1006,17 @@ enum SelfCheck {
     private static func measuresFromLocationWhenDeltasAreEmpty() {
         var recognizer = MouseGestureRecognizer()
         recognizer.begin(at: CGPoint(x: 500, y: 500))
-        var fired: MouseGestureDirection?
+        var firstUpdate: MouseGestureUpdate?
         for step in 1...8 {
             let point = CGPoint(x: 500, y: 500 - Double(step) * 10)
-            if let direction = recognizer.append(location: point, fieldDeltaX: 0, fieldDeltaY: 0) {
-                fired = fired ?? direction
+            if let update = recognizer.append(location: point, fieldDeltaX: 0, fieldDeltaY: 0) {
+                firstUpdate = firstUpdate ?? update
             }
         }
-        expect(fired == .up, "位移字段为 0 时改用事件坐标测量，仍能识别方向")
+        expect(
+            firstUpdate == .began(axis: .vertical, pixelDelta: -10),
+            "位移字段为 0 时改用事件坐标测量，仍能锁定纵轴"
+        )
         expectClose(recognizer.maximumDistanceFromOrigin, 80, "累积位移取自坐标差")
         expect(!recognizer.shouldTreatAsClick, "有真实移动时不会被误判成原地单击")
     }
@@ -876,28 +1027,43 @@ enum SelfCheck {
         var recognizer = MouseGestureRecognizer()
         let edge = CGPoint(x: 1919, y: 500)
         recognizer.begin(at: edge)
-        var fired: MouseGestureDirection?
+        var firstUpdate: MouseGestureUpdate?
         for _ in 1...6 {
-            if let direction = recognizer.append(location: edge, fieldDeltaX: 12, fieldDeltaY: 0) {
-                fired = fired ?? direction
+            if let update = recognizer.append(location: edge, fieldDeltaX: 12, fieldDeltaY: 0) {
+                firstUpdate = firstUpdate ?? update
             }
         }
-        expect(fired == .right, "指针被屏幕边缘卡住、坐标不再变化时，改用位移字段")
+        expect(
+            firstUpdate == .began(axis: .horizontal, pixelDelta: 12),
+            "指针被屏幕边缘卡住、坐标不再变化时，改用位移字段"
+        )
     }
 
     private static func commitsDominantAxis() {
         var up = MouseGestureRecognizer()
         // CGEvent delta Y is positive downward, so negative travel is "up".
-        expect(up.append(deltaX: 0, deltaY: -50) == .up, "向上划识别为 up")
+        expect(
+            up.append(deltaX: 0, deltaY: -50) == .began(axis: .vertical, pixelDelta: -50),
+            "向上划锁定纵轴并保留符号"
+        )
 
         var down = MouseGestureRecognizer()
-        expect(down.append(deltaX: 0, deltaY: 50) == .down, "向下划识别为 down")
+        expect(
+            down.append(deltaX: 0, deltaY: 50) == .began(axis: .vertical, pixelDelta: 50),
+            "向下划锁定纵轴并保留符号"
+        )
 
         var left = MouseGestureRecognizer()
-        expect(left.append(deltaX: -50, deltaY: 0) == .left, "向左划识别为 left")
+        expect(
+            left.append(deltaX: -50, deltaY: 0) == .began(axis: .horizontal, pixelDelta: -50),
+            "向左划锁定横轴并保留符号"
+        )
 
         var right = MouseGestureRecognizer()
-        expect(right.append(deltaX: 50, deltaY: 0) == .right, "向右划识别为 right")
+        expect(
+            right.append(deltaX: 50, deltaY: 0) == .began(axis: .horizontal, pixelDelta: 50),
+            "向右划锁定横轴并保留符号"
+        )
     }
 
     private static func ignoresDiagonalDrift() {
@@ -905,17 +1071,34 @@ enum SelfCheck {
         // Past the activation distance but with neither axis dominant: hold off deciding.
         expect(recognizer.append(deltaX: 45, deltaY: 44) == nil, "太斜的移动不会替用户猜方向")
         // Committing further along one axis then resolves it.
-        expect(recognizer.append(deltaX: 40, deltaY: 0) == .right, "继续沿一个轴移动后才判定")
+        expect(
+            recognizer.append(deltaX: 40, deltaY: 0)
+                == .began(axis: .horizontal, pixelDelta: 85),
+            "继续沿一个轴移动后才锁定，并补回死区内累计位移"
+        )
     }
 
-    private static func firesOncePerHold() {
+    private static func keepsAxisLockedAfterFirstDirection() {
         var recognizer = MouseGestureRecognizer()
-        expect(recognizer.append(deltaX: -50, deltaY: 0) == .left, "第一次越过阈值触发")
-        var extra = 0
-        for _ in 0..<20 where recognizer.append(deltaX: -50, deltaY: 0) != nil {
-            extra += 1
-        }
-        expect(extra == 0, "一次按住只触发一个动作，长距离划动不会连跳好几个桌面")
+        expect(
+            recognizer.append(deltaX: -50, deltaY: 0)
+                == .began(axis: .horizontal, pixelDelta: -50),
+            "第一次越过阈值锁定横轴"
+        )
+        expect(
+            recognizer.append(deltaX: -12, deltaY: 3)
+                == .changed(axis: .horizontal, pixelDelta: -12),
+            "识别器继续记录同向增量，供诊断使用但路由器不会重复触发"
+        )
+        expect(
+            recognizer.append(deltaX: 30, deltaY: -4)
+                == .changed(axis: .horizontal, pixelDelta: 30),
+            "识别器保留反向增量，但 Logi 风格路由在同一次按住中会忽略它"
+        )
+        expect(
+            recognizer.append(deltaX: 0, deltaY: 100) == nil,
+            "锁定横轴后忽略垂直漂移，不在一次按住中切换系统手势类型"
+        )
     }
 
     private static func treatsStillHoldAsClick() {
@@ -925,20 +1108,20 @@ enum SelfCheck {
 
         var moved = MouseGestureRecognizer()
         _ = moved.append(deltaX: 0, deltaY: -50)
-        expect(moved.completion == .direction(.up), "已经识别出的方向不会在抬起时再变成单击")
+        expect(moved.completion == .gesture(.vertical), "已经锁轴的拖动不会在抬起时再变成单击")
 
         var deadZone = MouseGestureRecognizer()
-        _ = deadZone.append(deltaX: 25, deltaY: 0)
-        expect(deadZone.completion == .click, "25px 未越过方向阈值时明确回落为单击")
+        _ = deadZone.append(deltaX: 5, deltaY: 0)
+        expect(deadZone.completion == .click, "5px 未越过方向阈值时明确回落为单击")
 
         var diagonal = MouseGestureRecognizer()
         _ = diagonal.append(deltaX: 300, deltaY: 300)
         expect(diagonal.completion == .click, "长距离 45° 斜划不乱猜方向，并在抬起时回落为单击")
 
         var roundTrip = MouseGestureRecognizer()
-        _ = roundTrip.append(deltaX: 11, deltaY: 0)
-        _ = roundTrip.append(deltaX: -11, deltaY: 0)
-        expect(roundTrip.completion == .click, "11px 往返手抖也有确定的单击结果")
+        _ = roundTrip.append(deltaX: 3, deltaY: 0)
+        _ = roundTrip.append(deltaX: -3, deltaY: 0)
+        expect(roundTrip.completion == .click, "死区内往返手抖也有确定的单击结果")
     }
 
     private static func mapsDirectionsLikeLogiOptions() {
@@ -948,6 +1131,422 @@ enum SelfCheck {
         // same direction sense as a trackpad swipe.
         expect(MouseGestureDirection.left.action == .spaceRight, "左划 = 切到右边的桌面（与触控板同向）")
         expect(MouseGestureDirection.right.action == .spaceLeft, "右划 = 切到左边的桌面")
+    }
+
+    /// EventRouter must keep the whole signed movement stream on the interactive output edge.
+    /// Sending one symbolic hotkey here would recreate the exact uninterruptible animation this
+    /// path exists to replace.
+    /// A direct trace of Logi Options+ on 2026-08-31 showed no Dock-swipe events. Its agent
+    /// posts exactly one Control+Arrow-style action when the first direction locks, ignores all
+    /// later motion in the same hold, then allows a new physical press to fire immediately even
+    /// while the previous Space animation is still running.
+    private static func routesGestureLikeLogiOptions() {
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        let output = ProbeGestureOutput()
+        var gestureActions: [MouseAction] = []
+        var clickActions: [MouseAction] = []
+        let router = EventRouter(
+            config: snapshot,
+            gestureOutput: output,
+            runGestureAction: { gestureActions.append($0) },
+            runAction: { clickActions.append($0) }
+        )
+        router.updateBindings([ButtonBinding(button: 4, action: .gestureNavigation)])
+
+        guard let down = mouseButtonEvent(
+            type: .otherMouseDown,
+            button: 4,
+            modifiers: 0,
+            location: CGPoint(x: 500, y: 400)
+        ), let left = mouseMotionEvent(
+            location: CGPoint(x: 480, y: 400),
+            deltaX: -20,
+            deltaY: 0
+        ), let reverse = mouseMotionEvent(
+            location: CGPoint(x: 520, y: 400),
+            deltaX: 40,
+            deltaY: 0
+        ), let up = mouseButtonEvent(
+            type: .otherMouseUp,
+            button: 4,
+            modifiers: 0,
+            location: CGPoint(x: 520, y: 400)
+        ), let right = mouseMotionEvent(
+            location: CGPoint(x: 540, y: 400),
+            deltaX: 20,
+            deltaY: 0
+        ) else {
+            expect(false, "可构造 Logi 风格离散手势事件流")
+            return
+        }
+
+        _ = router.handleButton(type: .otherMouseDown, event: down)
+        _ = router.handleMotion(left)
+        _ = router.handleMotion(reverse)
+        _ = router.handleButton(type: .otherMouseUp, event: up)
+
+        expect(
+            gestureActions == [.spaceRight],
+            "一次按住只按第一次锁定的方向触发一次，后续反向移动不切回"
+        )
+        expect(
+            output.begins.isEmpty && output.changes.isEmpty && output.ends.isEmpty,
+            "生产手势不再进入造成跳跃的私有 Dock-swipe 路径"
+        )
+        expect(clickActions.isEmpty, "已形成方向的手势不会在抬起时再触发单击动作")
+
+        // A fresh physical press is a fresh command. There is intentionally no pacer state in
+        // EventRouter, so this second action is delivered synchronously to the injected edge.
+        _ = router.handleButton(type: .otherMouseDown, event: down)
+        _ = router.handleMotion(right)
+        _ = router.handleButton(type: .otherMouseUp, event: up)
+        expect(
+            gestureActions == [.spaceRight, .spaceLeft],
+            "松开重按后可立即触发下一次或反方向切换，不等待上一段动画完成"
+        )
+
+        var locationActions: [MouseAction] = []
+        let locationOnlyRouter = EventRouter(
+            config: snapshot,
+            runGestureAction: { locationActions.append($0) },
+            runAction: { _ in }
+        )
+        locationOnlyRouter.updateBindings([ButtonBinding(button: 4, action: .gestureNavigation)])
+        if let locationOnlyMotion = mouseMotionEvent(
+            location: CGPoint(x: 480, y: 400),
+            deltaX: 0,
+            deltaY: 0
+        ) {
+            _ = locationOnlyRouter.handleButton(type: .otherMouseDown, event: down)
+            _ = locationOnlyRouter.handleMotion(locationOnlyMotion)
+            expect(
+                locationActions == [.spaceRight],
+                "位移字段为空时仍从事件坐标识别第一次方向"
+            )
+            locationOnlyRouter.cancelButtonSessions()
+        } else {
+            expect(false, "可构造仅带坐标差的移动事件")
+        }
+
+        var accumulatedActions: [MouseAction] = []
+        let accumulatingRouter = EventRouter(
+            config: snapshot,
+            runGestureAction: { accumulatedActions.append($0) },
+            runAction: { _ in }
+        )
+        accumulatingRouter.updateBindings([ButtonBinding(button: 4, action: .gestureNavigation)])
+        if let firstFour = mouseMotionEvent(
+            location: CGPoint(x: 496, y: 400),
+            deltaX: -4,
+            deltaY: 0
+        ), let secondFour = mouseMotionEvent(
+            location: CGPoint(x: 492, y: 400),
+            deltaX: -4,
+            deltaY: 0
+        ) {
+            _ = accumulatingRouter.handleButton(type: .otherMouseDown, event: down)
+            _ = accumulatingRouter.handleMotion(firstFour)
+            expect(accumulatedActions.isEmpty, "第一段 4px 仍在死区内，不会过早触发")
+            _ = accumulatingRouter.handleMotion(secondFour)
+            expect(
+                accumulatedActions == [.spaceRight],
+                "连续 4px + 4px 会累计越过 7px 死区并只触发一次"
+            )
+            accumulatingRouter.cancelButtonSessions()
+        } else {
+            expect(false, "可构造两段死区内移动事件")
+        }
+
+        // Keep the private encoder testable without exposing it as production behaviour.
+        let diagnosticOutput = ProbeGestureOutput()
+        let diagnosticRouter = EventRouter(
+            config: snapshot,
+            usesInteractiveGestureNavigation: true,
+            gestureOutput: diagnosticOutput,
+            runGestureAction: { _ in },
+            runAction: { _ in }
+        )
+        diagnosticRouter.updateBindings([ButtonBinding(button: 4, action: .gestureNavigation)])
+        _ = diagnosticRouter.handleButton(type: .otherMouseDown, event: down)
+        _ = diagnosticRouter.handleMotion(left)
+        _ = diagnosticRouter.handleButton(type: .otherMouseUp, event: up)
+        expect(
+            diagnosticOutput.begins.count == 1 && diagnosticOutput.ends.count == 1,
+            "私有 Dock 编码器只在显式诊断模式下保持可测试"
+        )
+    }
+
+    private static func mouseMotionEvent(
+        location: CGPoint,
+        deltaX: Int64,
+        deltaY: Int64
+    ) -> CGEvent? {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: location,
+            mouseButton: .center
+        ) else { return nil }
+        event.setIntegerValueField(.mouseEventDeltaX, value: deltaX)
+        event.setIntegerValueField(.mouseEventDeltaY, value: deltaY)
+        return event
+    }
+
+    private static func dockSwipeProgressFollowsReversal() {
+        var frames: [DockSwipeFrame] = []
+        var pacedCancellationCount = 0
+        let synthesizer = DockSwipeSynthesizer(
+            supportsInteractiveNavigation: true,
+            screenSize: { _ in CGSize(width: 937, height: 768) },
+            endResendDelays: [],
+            cancelPendingSpaceSwitches: { pacedCancellationCount += 1 },
+            postFrame: { frames.append($0) }
+        )
+
+        expect(
+            synthesizer.begin(
+                button: 4,
+                axis: .horizontal,
+                initialPixelDelta: -100,
+                location: .zero,
+                canFreezePointer: true
+            ),
+            "支持的系统可以开始交互式 Dock-swipe"
+        )
+        expect(pacedCancellationCount == 1, "交互手势开始前清掉直接桌面动作的旧快捷键队列")
+        synthesizer.change(button: 4, pixelDelta: 40)
+        synthesizer.change(button: 4, pixelDelta: 90)
+        synthesizer.end(button: 4, cancelled: false)
+
+        expect(frames.map(\.phase) == [.began, .changed, .changed, .ended], "Dock-swipe 发送完整相位序列")
+        expect(
+            frames[0].progress > 0
+                && frames[1].progress < frames[0].progress
+                && frames[2].progress < 0,
+            "鼠标反向时累计进度立即回拉并可越过原点，不等待动画完成"
+        )
+        expect(
+            DockSwipeSynthesizer.progressDelta(
+                fromPixelDelta: -10,
+                axis: .horizontal,
+                scale: 1
+            ) == 10
+                && DockSwipeSynthesizer.progressDelta(
+                    fromPixelDelta: -10,
+                    axis: .vertical,
+                    scale: 1
+                ) == -10,
+            "横向与纵向遵循 Dock 的真实坐标约定：左推到右桌面、上推开调度中心"
+        )
+        expect(synthesizer.activeButton == nil, "抬起后清理交互式手势所有权")
+        _ = synthesizer.begin(
+            button: 4,
+            axis: .horizontal,
+            initialPixelDelta: 20,
+            location: .zero,
+            canFreezePointer: true
+        )
+        expect(
+            frames.last?.phase == .began && (frames.last?.progress ?? 0) < 0,
+            "上一段松手动画尚在结算时可立即用反向 began 接管"
+        )
+        synthesizer.cancelAll()
+
+        var unsupportedFrames: [DockSwipeFrame] = []
+        let unsupported = DockSwipeSynthesizer(
+            supportsInteractiveNavigation: false,
+            endResendDelays: [],
+            postFrame: { unsupportedFrames.append($0) }
+        )
+        expect(
+            !unsupported.begin(
+                button: 4,
+                axis: .horizontal,
+                initialPixelDelta: -10,
+                location: .zero,
+                canFreezePointer: true
+            ) && unsupportedFrames.isEmpty,
+            "协议不受支持时不发送系统会忽略的私有字段，交给路由器安全降级"
+        )
+        expect(
+            !DockSwipeSynthesizer.freezesPointerDuringProductionGesture,
+            "生产手势不以冻结光标为代价切断 BLE 鼠标的后续位移事件"
+        )
+    }
+
+    private static func dockSwipeCancelsContradictoryExit() {
+        var frames: [DockSwipeFrame] = []
+        var pointerAssociations: [Bool] = []
+        var clock: TimeInterval = 0
+        let synthesizer = DockSwipeSynthesizer(
+            supportsInteractiveNavigation: true,
+            screenSize: { _ in CGSize(width: 937, height: 768) },
+            endResendDelays: [],
+            freezesPointer: true,
+            setPointerAssociation: {
+                pointerAssociations.append($0)
+                return true
+            },
+            now: { clock },
+            postFrame: { frames.append($0) }
+        )
+        _ = synthesizer.begin(
+            button: 4,
+            axis: .horizontal,
+            initialPixelDelta: -100,
+            location: .zero,
+            canFreezePointer: true
+        )
+        // A sustained reversal over the velocity window pulls backward without crossing the
+        // origin. A normal Ended would commit in the stale accumulated direction.
+        clock = 0.10
+        synthesizer.change(button: 4, pixelDelta: 20)
+        synthesizer.end(button: 4, cancelled: false)
+        expect(frames.last?.phase == .cancelled, "松手方向与累计方向相反时以 cancelled 收尾")
+        expect(pointerAssociations == [false, true], "交互式手势开始冻结指针，正常收尾必定恢复关联")
+
+        frames.removeAll()
+        pointerAssociations.removeAll()
+        _ = synthesizer.begin(
+            button: 4,
+            axis: .vertical,
+            initialPixelDelta: -20,
+            location: .zero,
+            canFreezePointer: true
+        )
+        synthesizer.cancelAll()
+        expect(frames.last?.phase == .cancelled, "引擎 teardown 强制以 cancelled 释放 Dock 状态")
+        expect(pointerAssociations == [false, true], "异常 teardown 也会恢复指针关联，不把光标永久锁死")
+    }
+
+    private static func dockSwipeCommitsShortFastFlick() {
+        var fastFrames: [DockSwipeFrame] = []
+        var fastClock: TimeInterval = 0
+        let fast = DockSwipeSynthesizer(
+            supportsInteractiveNavigation: true,
+            screenSize: { _ in CGSize(width: 937, height: 768) },
+            endResendDelays: [],
+            now: { fastClock },
+            postFrame: { fastFrames.append($0) }
+        )
+        _ = fast.begin(
+            button: 4,
+            axis: .horizontal,
+            initialPixelDelta: -10,
+            location: .zero,
+            canFreezePointer: false
+        )
+        fastClock = 0.025
+        fast.change(button: 4, pixelDelta: -20)
+        fastClock = 0.035
+        fast.end(button: 4, cancelled: false)
+        expect(
+            fastFrames.last?.phase == .ended
+                && abs(fastFrames.last?.progress ?? 0) < DockSwipeSynthesizer.distanceCommitProgress
+                && abs(fastFrames.last?.exitSpeed ?? 0) >= DockSwipeSynthesizer.velocityCommitThreshold,
+            "小幅快速甩动以速度阈值完成切换，不要求拖过半屏"
+        )
+
+        var slowFrames: [DockSwipeFrame] = []
+        var slowClock: TimeInterval = 0
+        let slow = DockSwipeSynthesizer(
+            supportsInteractiveNavigation: true,
+            screenSize: { _ in CGSize(width: 937, height: 768) },
+            endResendDelays: [],
+            now: { slowClock },
+            postFrame: { slowFrames.append($0) }
+        )
+        _ = slow.begin(
+            button: 4,
+            axis: .horizontal,
+            initialPixelDelta: -10,
+            location: .zero,
+            canFreezePointer: false
+        )
+        slowClock = 0.30
+        slow.change(button: 4, pixelDelta: -10)
+        slowClock = 0.55
+        slow.end(button: 4, cancelled: false)
+        expect(
+            slowFrames.last?.phase == .cancelled,
+            "同样的小幅慢移在停顿后回弹，避免轻微调整误切桌面"
+        )
+        expect(
+            DockSwipeSynthesizer.pointerProgressGain == 4
+                && DockSwipeSynthesizer.maximumProgressMagnitude == 1.25,
+            "鼠标位移增益提高且累计进度有上限，兼顾短行程与大幅甩动"
+        )
+    }
+
+    private static func staleDockSwipeEndCannotCancelReversal() {
+        var frames: [DockSwipeFrame] = []
+        var delayedActions: [() -> Void] = []
+        let synthesizer = DockSwipeSynthesizer(
+            supportsInteractiveNavigation: true,
+            screenSize: { _ in CGSize(width: 937, height: 768) },
+            endResendDelays: [0.2, 0.5],
+            scheduleAfter: { _, action in
+                delayedActions.append(action)
+                return DispatchWorkItem(block: {})
+            },
+            postFrame: { frames.append($0) }
+        )
+        _ = synthesizer.begin(
+            button: 4,
+            axis: .horizontal,
+            initialPixelDelta: -20,
+            location: .zero,
+            canFreezePointer: true
+        )
+        synthesizer.end(button: 4, cancelled: false)
+        let oldResends = delayedActions
+        expect(oldResends.count == 2, "松手后安排两次可靠性 Ended 补发")
+
+        _ = synthesizer.begin(
+            button: 4,
+            axis: .horizontal,
+            initialPixelDelta: 20,
+            location: .zero,
+            canFreezePointer: true
+        )
+        let countAfterReversalBegan = frames.count
+        oldResends.forEach { $0() }
+        expect(
+            frames.count == countAfterReversalBegan && frames.last?.phase == .began,
+            "旧 Ended 即使已被 GCD 取出也会被 generation 拦截，不取消新反向手势"
+        )
+        synthesizer.cancelAll()
+    }
+
+    private static func dockSwipeEncoderCarriesRequiredFields() {
+        let frame = DockSwipeFrame(
+            axis: .horizontal,
+            phase: .ended,
+            progress: -1.25,
+            exitSpeed: -3.5
+        )
+        guard let events = DockSwipeEventPoster.makeEvents(frame) else {
+            expect(false, "可构造 Dock-swipe CGEvent 对")
+            return
+        }
+        expectClose(DockSwipeEventPoster.doubleField(55, in: events.marker), 29, "伴随事件类型为 gesture (29)")
+        expectClose(DockSwipeEventPoster.doubleField(55, in: events.control), 30, "主事件类型为 Dock control (30)")
+        expectClose(DockSwipeEventPoster.doubleField(110, in: events.control), 23, "主事件 subtype 为 Dock-swipe (23)")
+        expectClose(DockSwipeEventPoster.doubleField(132, in: events.control), 4, "编码 ended 主相位")
+        expectClose(DockSwipeEventPoster.doubleField(134, in: events.control), 4, "编码 ended 冗余相位")
+        expectClose(DockSwipeEventPoster.doubleField(124, in: events.control), -1.25, "编码可逆累计进度")
+        expect(
+            DockSwipeEventPoster.integerField(135, in: events.control)
+                == Int64(Float(-1.25).bitPattern),
+            "累计进度同时按 Float32 bit pattern 编码"
+        )
+        expectClose(DockSwipeEventPoster.doubleField(123, in: events.control), 1, "横轴编码为 1")
+        expect(
+            DockSwipeEventPoster.integerField(136, in: events.control) == 0,
+            "macOS 14–26 的字段式合成事件必须保持 invertedFromDevice 为 0"
+        )
+        expectClose(DockSwipeEventPoster.doubleField(129, in: events.control), -3.5, "退出速度写入主字段")
+        expectClose(DockSwipeEventPoster.doubleField(130, in: events.control), -3.5, "退出速度写入冗余字段")
     }
 
     // MARK: Action kinds
@@ -1645,6 +2244,36 @@ enum SelfCheck {
             SystemHotkeys.Resolution.disabledBySystem != .stroke(SystemHotkeys.defaults[.missionControl]!),
             "被系统关闭的快捷键与可用快捷键是两种不同结果，不会静默当成可用"
         )
+    }
+
+    private static func gestureSpaceStrokeMatchesLogiTrace() {
+        let flags: CGEventFlags = [.maskControl, .maskSecondaryFn]
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let events = ActionRunner.gestureSpaceEvents(
+                  keyCode: 123,
+                  flags: flags,
+                  source: source
+              )
+        else {
+            expect(false, "可构造 Logi 风格桌面切换按键序列")
+            return
+        }
+        expect(
+            events.map(\.type) == [.keyDown, .keyUp, .flagsChanged],
+            "手势桌面切换发送 keyDown、keyUp、清修饰键三段序列"
+        )
+        expect(
+            events[0].flags == flags
+                && events[1].flags == .maskSecondaryFn
+                && events[2].flags.isEmpty,
+            "按下为 Control+Fn，抬起保留 Fn，最后清空 flags（与 Logi 采样一致）"
+        )
+        expect(
+            events[0].getIntegerValueField(.keyboardEventKeycode) == 123
+                && events[1].getIntegerValueField(.keyboardEventKeycode) == 123,
+            "左右桌面手势使用系统方向键键码"
+        )
+        expect(events.allSatisfy(SyntheticEventTag.isMarked), "Logi 风格手势事件全部带防回环标记")
     }
 
     private static func rejectsInvalidSystemHotkeyNumbers() {

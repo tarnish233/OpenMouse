@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检 230 项 + 发布签名脚本检查 6 项，必须全过
+make test     # 内置自检 280 项 + 发布签名脚本检查 6 项，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -100,11 +100,11 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
                     │      │             │     ├─▶ ScrollSmoothingFilter   二级：一阶低通
                     │      │             │     ├─▶ DisplayLinkTicker       vsync 帧源
                     │      │             │     └─▶ ScrollEventPoster       postToPid 投递
-                    │      │             ├─▶ MouseGestureRecognizer（手势导航）
-                    │      │             └─▶ ActionRunner（按键动作）
+                    │      │             ├─▶ MouseGestureRecognizer（首次方向锁轴）
+                    │      │             └─▶ ActionRunner（按键动作 / Logi 风格即时手势）
                     │      │                    ├─▶ SystemHotkeys      读系统快捷键配置
                     │      │                    ├─▶ KeyboardLayout     字符 → 当前布局键码
-                    │      │                    └─▶ SpaceSwitchPacer   桌面切换节流
+                    │      │                    └─▶ SpaceSwitchPacer   仅普通桌面动作节流
                     │      └─▶ EventTapController   motion tap（仅手势期间开启）
                     │
                     ├─▶ SettingsStore      JSON 持久化 + ResolvedConfig 快照
@@ -136,7 +136,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 几个特殊路径：
 
 - **⌘⇥ 需要真的按下 ⌘ 键。** App switcher 读的是系统的修饰键状态而不是事件 flags，只设 `maskCommand` 完全没反应（保留 / 释放修饰键两种都试过）。必须先发 ⌘ 键自己的 `flagsChanged`，见 `keyStrokeWithRealModifiers`。
-- **桌面切换必须节流，这不是冷却。** macOS 把空间切换做成动画，动画期间收到的请求是**丢弃**而不是排队。`SpaceSwitchPacer`：0.12s 间隔（Mos 同值），最多积压 2 步，**反向时丢弃积压**（往回划的人想立刻回去，不是想撤销队列）。
+- **单独绑定的“左右切换桌面”动作保留节流。** `SpaceSwitchPacer`：0.12s 间隔（Mos 同值），最多积压 2 步，反向时丢弃积压。**手势导航必须绕过 pacer**：2026-08-31 对 `logioptionsplus_agent` 的直接事件采样显示，它在每次物理按住的第一次方向锁定时立即发一次 `Control+Fn+Left/Right Arrow`，即使前一段桌面动画还在运行也不排队。
 - **媒体键不是键码**，走 `NSEvent.otherEvent(with: .systemDefined, subtype: 8)` + `NX_KEYTYPE_*` 装在 `data1`。
 - **功能行键码要一个个实测**：`160` = 调度中心、`131` = 启动台、`178` = 控制中心，在 macOS 26.6 上验证有效。`177`（聚焦）与 `176`（听写）实测**已失效**，故意没收入——宁可没有这一项，不要一个选得到但不动的选项。注意 Mos 的标识符 `appExpose` 看名字像「应用程序窗口」，但它界面上写的是「启动台」；名字不是证据，日志才是。
 
@@ -146,7 +146,9 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 **不能只读增量字段。** 某些鼠标发的 `otherMouseDragged` 三个增量字段全是 0，只读它们的话累积位移永远是 0，每次按住都被判成「原地单击」。识别器用事件坐标做差分，增量字段非零时才优先采信（屏幕边缘会夹住坐标，那时差分为 0 而增量字段仍然对）。
 
-阈值：40px 才算划动，某轴要比另一轴多 1.2 倍（避免斜划乱猜）。**一次按住只触发一个动作**，否则一次长划反复越过阈值会跳三个桌面。未形成主轴方向的输入（短移动、斜划、往返手抖）在抬起时统一回落为单击，不能落入「方向和单击都不是」的死区。横向刻意反向（左划 = 切到右边的桌面），与触控板同向。
+阈值：7px 后锁轴，某轴要比另一轴多 1.2 倍（避免斜划乱猜）。锁轴的第一个带符号增量立即映射为一个动作：上 = 调度中心、下 = 应用程序窗口、左 = 右桌面、右 = 左桌面。**一次按住只触发一次**；同一按住中的继续移动和反向都忽略。松开重按才开始下一次识别，且桌面动作直接走 `ActionRunner.runGestureNavigation`，不能进入 `SpaceSwitchPacer`。
+
+采样到的 Logi 左右桌面序列是：`keyDown(Control+Fn+Arrow)` → `keyUp(Fn+Arrow)` → `flagsChanged(0)`，来源状态为 `.hidSystemState`。`ActionRunner.gestureSpaceEvents` 保持这个形状。没有发现 Logi 发 `type 29/30` Dock-swipe 或滚轮动量来完成桌面切换。`DockSwipeSynthesizer` 仅保留为私有协议诊断与编码实验（来源和许可证见 `THIRD_PARTY_NOTICES.md`），**不得接回生产手势路径**；实测强行补 progress 会造成跳跃且仍无法复现 Logi 的提交行为。
 
 **被吞掉的按下拥有它的抬起。** `EventRouter` 在 mouse-down 时记录 claim；mouse-up 只按这份会话状态收尾，不能重新解析当时的修饰键、绑定或前台应用。任何 tap 重建、权限丢失、引擎关闭与自动恢复都必须经统一 teardown 清掉 claim、gesture session、motion tap 和权限轮询。
 

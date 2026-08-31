@@ -30,6 +30,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_PATH" "$APP/Contents/MacOS/$EXECUTABLE"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+[ -f "$ROOT/LICENSE" ] && cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
+[ -f "$ROOT/THIRD_PARTY_NOTICES.md" ] \
+  && cp "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 [ -f "$ROOT/Resources/AppIcon.icns" ] && cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
@@ -40,12 +43,14 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   IDENTITY="$CODESIGN_IDENTITY"
   IDENTITY_LABEL="$CODESIGN_IDENTITY"
 else
-  # Development bundles may auto-select a stable identity. Distribution never enters this
-  # branch: it requires the maintainer to name the intended Developer ID certificate.
-  # Select by SHA-1 hash, not by name, because duplicate common names are common.
+  # A Developer ID identity is stable and launchable without a provisioning profile. Do not
+  # auto-select Apple Development here: revoked/expired development certificates can still be
+  # listed as usable by `find-identity`, produce a bundle that passes `codesign --verify`, and
+  # then be rejected by AMFI at launch. Distribution never enters this branch because it must
+  # name an explicit Developer ID identity.
   IDENTITY_LINE="$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -v CSSMERR \
-    | grep -E '"(Apple Development|Developer ID Application)' \
+    | grep -E '"Developer ID Application' \
     | head -1 || true)"
   IDENTITY="$(printf '%s' "$IDENTITY_LINE" | grep -oE '[0-9A-F]{40}' | head -1 || true)"
   IDENTITY_LABEL="$(printf '%s' "$IDENTITY_LINE" | grep -oE '"[^"]*"' | tr -d '"' || true)"
@@ -62,8 +67,11 @@ if [ -n "$IDENTITY" ]; then
       --sign "$IDENTITY" "$APP" 2>&1 | sed 's/^/    /'
   fi
 else
-  echo "==> codesign ad-hoc (no identity found; Accessibility permission may reset on rebuild)"
-  codesign --force --sign - "$APP" 2>&1 | sed 's/^/    /'
+  # Keep the ad-hoc designated requirement tied to this exact build's CDHash. A weaker,
+  # identifier-only requirement would make TCC permissions transferable to any replacement
+  # bundle using the same identifier. Debug rebuilds therefore require explicit re-authorization.
+  echo "==> codesign ad-hoc (Accessibility/Input Monitoring may reset for this rebuild)"
+  codesign --force --options runtime --sign - "$APP" 2>&1 | sed 's/^/    /'
 fi
 
 codesign --verify --strict --verbose=1 "$APP" 2>&1 | sed 's/^/    /'

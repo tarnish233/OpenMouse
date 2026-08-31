@@ -15,6 +15,12 @@ final class EventRouter {
 
     private let animator: ScrollAnimator
     private let runAction: (MouseAction) -> Void
+    private let runGestureAction: (MouseAction) -> Void
+    private let gestureOutput: any GestureNavigationOutput
+    /// Kept as an explicit test/diagnostic seam for the private Dock encoder. Production gesture
+    /// navigation is discrete because a direct Logi Options+ event trace showed exactly one
+    /// Control+Arrow shortcut per physical hold and no Dock-swipe events.
+    private let usesInteractiveGestureNavigation: Bool
 
     private let config: Locked<ResolvedConfig>
     private let scrollRules: ScrollRuleResolver?
@@ -22,6 +28,10 @@ final class EventRouter {
     /// When set, button presses are reported here (with the modifiers held) and swallowed
     /// instead of being acted on, so the settings UI can record a binding from a real press.
     private let captureHandler = Locked<((Int, UInt64) -> Void)?>(nil)
+    /// Buttons whose native CGEvent stream has been replaced by HID++ physical-state reports.
+    /// Native events for these controls are swallowed to avoid a momentary down/up racing the
+    /// real HID++ hold lifecycle.
+    private let hidppOwnedButtons = Locked<Set<Int>>([])
 
     /// Timestamp of the last wheel notch, for the flywheel acceleration curve.
     private var lastNotchTime: CFTimeInterval = 0
@@ -34,9 +44,20 @@ final class EventRouter {
     /// consult this session state, not re-resolve mutable bindings/modifiers and risk exposing a
     /// bare mouse-up to the application underneath.
     private var buttonClaims: [Int: ButtonClaim] = [:]
+    private enum GestureDelivery: Equatable {
+        case pending
+        case interactive
+        case oneShot
+    }
+
+    private struct GestureSession {
+        var recognizer: MouseGestureRecognizer
+        var delivery: GestureDelivery = .pending
+    }
+
     /// Active gesture-navigation holds, keyed by button number. A dictionary rather than a
     /// single slot because two buttons can be bound to gestures and held at once.
-    private var gestureSessions: [Int: MouseGestureRecognizer] = [:]
+    private var gestureSessions: [Int: GestureSession] = [:]
     /// Motion events seen in the current hold, so tracing can log the first few and stop.
     private var motionEventCount = 0
 
@@ -48,10 +69,18 @@ final class EventRouter {
     init(
         config: Locked<ResolvedConfig>,
         scrollRules: ScrollRuleResolver? = nil,
+        usesInteractiveGestureNavigation: Bool = false,
+        gestureOutput: any GestureNavigationOutput = DockSwipeSynthesizer.shared,
+        runGestureAction: @escaping (MouseAction) -> Void = {
+            ActionRunner().runGestureNavigationAsync($0)
+        },
         runAction: @escaping (MouseAction) -> Void = { ActionRunner().runAsync($0) }
     ) {
         self.config = config
         self.scrollRules = scrollRules
+        self.usesInteractiveGestureNavigation = usesInteractiveGestureNavigation
+        self.gestureOutput = gestureOutput
+        self.runGestureAction = runGestureAction
         self.runAction = runAction
         animator = ScrollAnimator(stats: stats)
     }
@@ -68,6 +97,23 @@ final class EventRouter {
         bindings.value = list.filter(\.isActive)
     }
 
+    func updateHIDPPOwnedButtons(_ buttons: Set<Int>) {
+        hidppOwnedButtons.value = buttons
+    }
+
+    /// HID++ reports physical button state directly, without a CGEvent carrying flags/location.
+    /// Sample both from the current session and feed the same ownership/gesture state machine.
+    func handleHIDPPButton(button: Int, isDown: Bool) {
+        let modifiers = CGEventSource.flagsState(.combinedSessionState).rawValue & Self.modifierMask
+        let location = CGEvent(source: nil)?.location ?? .zero
+        _ = processButton(
+            button: button,
+            isDown: isDown,
+            modifiers: modifiers,
+            location: location
+        )
+    }
+
     /// Frame source in use for the current or most recent glide.
     var frameSource: DisplayLinkTicker.Source { animator.frameSource }
 
@@ -79,6 +125,9 @@ final class EventRouter {
     /// because no matching button-up can be trusted to arrive afterward.
     func cancelButtonSessions() {
         buttonClaims.removeAll()
+        // The private Dock encoder is retained only behind an explicit diagnostic seam. If that
+        // seam is in use, its delayed reliability resends must not outlive a tap rebuild.
+        if usesInteractiveGestureNavigation { gestureOutput.cancelAll() }
         guard !gestureSessions.isEmpty else { return }
         gestureSessions.removeAll()
         onGestureActivityChanged?(false)
@@ -330,32 +379,48 @@ final class EventRouter {
 
     func handleButton(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
-        let isDown = type == .otherMouseDown
+        // Once HID++ diversion owns a control, the device's old native stream is at best a
+        // duplicate and at worst the 4–20 ms fake hold that broke gesture navigation.
+        guard !hidppOwnedButtons.value.contains(button) else { return nil }
+        let handled = processButton(
+            button: button,
+            isDown: type == .otherMouseDown,
+            modifiers: event.flags.rawValue & Self.modifierMask,
+            location: event.location
+        )
+        return handled ? nil : Unmanaged.passUnretained(event)
+    }
 
+    @discardableResult
+    private func processButton(
+        button: Int,
+        isDown: Bool,
+        modifiers: UInt64,
+        location: CGPoint
+    ) -> Bool {
         // A swallowed down owns its matching release regardless of what changed meanwhile:
         // modifiers may have been released, bindings edited, the app disabled, or capture ended.
         if !isDown, let claim = buttonClaims.removeValue(forKey: button) {
             finishButtonClaim(claim, button: button)
-            return nil
+            return true
         }
-        guard isDown else { return Unmanaged.passUnretained(event) }
+        guard isDown else { return false }
+        // Ignore a duplicate source while the same logical button is already held.
+        guard buttonClaims[button] == nil else { return true }
 
         // Recording mode takes priority over every binding, otherwise a button already mapped
         // to Mission Control could never be recorded again. Its release is claimed as well;
         // capture normally ends asynchronously before that release arrives.
         if let report = captureHandler.value {
-            let modifiers = event.flags.rawValue & Self.modifierMask
             buttonClaims[button] = .capture
             DispatchQueue.main.async { report(button, modifiers) }
-            return nil
+            return true
         }
 
-        guard config.value.buttonsActive else { return Unmanaged.passUnretained(event) }
-
-        let modifiers = event.flags.rawValue & Self.modifierMask
+        guard config.value.buttonsActive else { return false }
         guard let binding = bindings.value.resolve(button: button, modifiers: modifiers) else {
             Trace.buttonUnbound(button: button)
-            return Unmanaged.passUnretained(event)
+            return false
         }
         let action = binding.action
         buttonClaims[button] = .action(action)
@@ -364,8 +429,8 @@ final class EventRouter {
         if action == .gestureNavigation {
             let wasIdle = gestureSessions.isEmpty
             var recognizer = MouseGestureRecognizer()
-            recognizer.begin(at: event.location)
-            gestureSessions[button] = recognizer
+            recognizer.begin(at: location)
+            gestureSessions[button] = GestureSession(recognizer: recognizer)
             motionEventCount = 0
             Trace.gestureBegan(button: button)
             if wasIdle { onGestureActivityChanged?(true) }
@@ -373,7 +438,7 @@ final class EventRouter {
             stats.withValue { $0.buttonActionsFired += 1 }
             runAction(action)
         }
-        return nil
+        return true
     }
 
     private func finishButtonClaim(_ claim: ButtonClaim, button: Int) {
@@ -382,16 +447,20 @@ final class EventRouter {
         guard action == .gestureNavigation,
               let session = gestureSessions.removeValue(forKey: button) else { return }
 
+        if session.delivery == .interactive {
+            gestureOutput.end(button: button, cancelled: false)
+        }
+
         Trace.gestureEnded(
             button: button,
-            asClick: session.shouldTreatAsClick,
-            travelled: session.maximumDistanceFromOrigin,
+            asClick: session.recognizer.shouldTreatAsClick,
+            travelled: session.recognizer.maximumDistanceFromOrigin,
             motionEvents: motionEventCount
         )
         if gestureSessions.isEmpty { onGestureActivityChanged?(false) }
         // A hold that never moved is a click, and a click on the gesture button opens Mission
         // Control.
-        if session.shouldTreatAsClick {
+        if session.recognizer.shouldTreatAsClick {
             stats.withValue { $0.buttonActionsFired += 1 }
             runAction(.missionControl)
         }
@@ -403,9 +472,9 @@ final class EventRouter {
     /// was swallowed, the system never enters a drag for that button, so the movement is
     /// delivered as a plain `.mouseMoved` — subscribing only to `.otherMouseDragged` means
     /// never being called at all, which is how this feature managed to look implemented and
-    /// do nothing. Both are accepted, and the movement is passed through untouched: the
-    /// pointer belongs to the user even mid-gesture.
-    private func handleMotion(_ event: CGEvent) -> Unmanaged<CGEvent>? {
+    /// do nothing. Both are accepted. The event itself remains untouched; production keeps the
+    /// pointer associated because dissociation starves subsequent BLE mouse movement on macOS 26.
+    func handleMotion(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         guard !gestureSessions.isEmpty else { return Unmanaged.passUnretained(event) }
 
         // Read the delta fields with the integer accessor they are declared as, then let the
@@ -425,12 +494,59 @@ final class EventRouter {
         // Snapshot the keys: mutating the dictionary while iterating its lazy view is not
         // something to rely on.
         for button in Array(gestureSessions.keys) {
-            guard let direction = gestureSessions[button]?
-                .append(location: location, fieldDeltaX: dx, fieldDeltaY: dy)
-            else { continue }
-            Trace.recognized(direction: direction.rawValue, action: "\(direction.action)")
-            stats.withValue { $0.buttonActionsFired += 1 }
-            runAction(direction.action)
+            guard var session = gestureSessions[button] else { continue }
+            if session.delivery == .interactive, dx == 0, dy == 0 {
+                // A device can stop populating its delta fields mid-hold. If its cursor remains
+                // frozen, coordinate differencing cannot take over on the next sample either.
+                gestureOutput.allowPointerMovement(button: button)
+            }
+            let update = session.recognizer.append(
+                location: location,
+                fieldDeltaX: dx,
+                fieldDeltaY: dy
+            )
+            // `append` mutates the dead-zone displacement and previous location even when it
+            // does not emit an update. Persist that state; otherwise 4 px + 4 px never reaches
+            // the 7 px threshold and location-only devices keep differencing from stale data.
+            gestureSessions[button] = session
+            guard let update else { continue }
+
+            switch update {
+            case let .began(axis, pixelDelta):
+                let anotherInteractiveGesture = gestureSessions.contains { otherButton, other in
+                    otherButton != button && other.delivery == .interactive
+                }
+                if usesInteractiveGestureNavigation,
+                   !anotherInteractiveGesture,
+                   gestureOutput.supportsInteractiveNavigation,
+                   gestureOutput.begin(
+                       button: button,
+                       axis: axis,
+                       initialPixelDelta: pixelDelta,
+                       location: location,
+                       // If both fields are empty, this device is being measured from cursor
+                       // coordinates. Freezing that cursor would remove its only usable signal.
+                       canFreezePointer: dx != 0 || dy != 0
+                   ) {
+                    session.delivery = .interactive
+                    Trace.interactiveGestureBegan(axis: axis.rawValue, delta: pixelDelta)
+                } else {
+                    // Logi Options+ emits one fixed Control+Arrow-style action on the first
+                    // direction of a hold. Later movement (including reversal) is ignored until
+                    // the button is physically released and pressed again.
+                    let direction = axis.direction(forPixelDelta: pixelDelta)
+                    session.delivery = .oneShot
+                    Trace.recognized(direction: direction.rawValue, action: "\(direction.action)")
+                    runGestureAction(direction.action)
+                }
+                stats.withValue { $0.buttonActionsFired += 1 }
+
+            case let .changed(_, pixelDelta):
+                if session.delivery == .interactive {
+                    gestureOutput.change(button: button, pixelDelta: pixelDelta)
+                }
+            }
+            gestureSessions[button] = session
         }
         return Unmanaged.passUnretained(event)
     }

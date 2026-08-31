@@ -42,6 +42,9 @@ final class MouseEngine {
     /// time. Subscribing permanently would mean paying that cost all day for a feature that
     /// is almost always idle.
     private let motionTap: any EventTapLifecycle
+    /// Logitech BLE buttons can expose only a momentary native CGEvent. HID++ diversion gives
+    /// the router the physical hold lifecycle required by gesture navigation. Nil in self-checks.
+    private let hidpp: LogitechHIDPPManager?
     private let isTrusted: () -> Bool
     private var permissionPoll: Timer?
     private var tapRetry: Timer?
@@ -57,11 +60,20 @@ final class MouseEngine {
         let motionTap = EventTapController(label: "motion") { proxy, type, event in
             router.handle(proxy: proxy, type: type, event: event)
         }
+        let hidpp = LogitechHIDPPManager(
+            onButton: { button, isDown in
+                router.handleHIDPPButton(button: button, isDown: isDown)
+            },
+            onOwnedButtonsChanged: { buttons in
+                router.updateHIDPPOwnedButtons(buttons)
+            }
+        )
         self.init(
             store: store,
             router: router,
             tap: tap,
             motionTap: motionTap,
+            hidpp: hidpp,
             isTrusted: { AccessibilityPermission.isTrusted }
         )
     }
@@ -72,12 +84,14 @@ final class MouseEngine {
         router: EventRouter,
         tap: any EventTapLifecycle,
         motionTap: any EventTapLifecycle,
+        hidpp: LogitechHIDPPManager? = nil,
         isTrusted: @escaping () -> Bool
     ) {
         self.store = store
         self.router = router
         self.tap = tap
         self.motionTap = motionTap
+        self.hidpp = hidpp
         self.isTrusted = isTrusted
 
         let recover: (EventTapDisableReason) -> Void = { [weak self] reason in
@@ -150,6 +164,7 @@ final class MouseEngine {
             // pure disruption: it drops events and tears down gestures while sliders move.
             stopTapRetry()
             status = .running
+            reconcileHIDPP(preferences: prefs)
             return
         }
 
@@ -169,6 +184,14 @@ final class MouseEngine {
         stopTapRetry()
         currentMainMask = mask
         status = .running
+        reconcileHIDPP(preferences: prefs)
+    }
+
+    private func reconcileHIDPP(preferences: Preferences) {
+        guard let hidpp else { return }
+        hidpp.start()
+        let buttons = Set(preferences.buttons.filter(\.isActive).map(\.button))
+        hidpp.updateDesiredButtons(buttons)
     }
 
     private func teardownRuntime() {
@@ -176,6 +199,8 @@ final class MouseEngine {
         motionTap.stop()
         router.cancelButtonSessions()
         router.cancelInFlightScrolling()
+        hidpp?.stop()
+        router.updateHIDPPOwnedButtons([])
         stopPermissionPoll()
         stopTapRetry()
         currentMainMask = nil

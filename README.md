@@ -6,7 +6,7 @@ macOS 菜单栏小工具，做三件事：
 - **独立反向** —— 只反转鼠标滚轮的方向，触控板不受影响
 - **按键与手势** —— 把鼠标的额外按键映射成系统动作、自定义快捷键，或手势导航
 
-纯 `CGEventTap` 实现，**没有内核扩展、没有驱动、不需要关闭 SIP**。滚动手感默认值对齐 [Mos](https://github.com/Caldis/Mos)，手势导航参考 Logi Options+ 与 [logiops](https://github.com/PixlOne/logiops)。
+基于 Core Graphics 事件管线实现，**没有内核扩展、没有驱动、不需要关闭 SIP**。滚动手感默认值对齐 [Mos](https://github.com/Caldis/Mos)；Logitech 按键接管参考 HID++ 开源逆向资料，手势导航则按 2026-08-31 对 Logi Options+ 实际输出的事件采样实现。
 
 > **同类软件只能开一个。** Mos / LinearMouse / Mac Mouse Fix / Scroll Reverser / BetterTouchTool / Logi Options+ 都会抢同一条事件链，谁赢取决于启动顺序，表现出来像随机失灵。Open Mouse 检测到这种情况会在设置页顶部直接点名。
 
@@ -18,6 +18,7 @@ macOS 菜单栏小工具，做三件事：
 
 1. **首次打开会被拦下来** —— 本版本没有做 Apple 公证。双击后到「系统设置 › 隐私与安全性」，在下方找到提示点「仍要打开」。
 2. **授予辅助功能权限** —— 系统设置 › 隐私与安全性 › 辅助功能 → 打开 Open Mouse。授权后一秒内自动接管，不用重启应用。
+3. **Logitech HID++ 设备还需输入监控** —— 系统设置 › 隐私与安全性 › 输入监控 → 打开 Open Mouse，才能可靠读取 Bolt / Unifying / 蓝牙直连设备的物理按住与抬起。
 
 配置存在 `~/Library/Application Support/OpenMouse/preferences.json`，是给人看的 JSON，可以直接编辑。
 
@@ -61,7 +62,7 @@ macOS 菜单栏小工具，做三件事：
 | 左划 | 切到**右**边的桌面 |
 | 右划 | 切到**左**边的桌面 |
 
-横向是刻意反的：把鼠标往左推等于把当前桌面推开，和触控板划动同向。一次按住只触发一个动作，手势期间指针原地不动。
+横向是刻意反的：把鼠标往左推等于把当前桌面推开，和触控板划动同向。越过 7px 死区并锁定方向后，**一次物理按住只触发第一次移动对应的一个系统动作**；同一次按住中的继续移动、速度变化和反向都不会重复触发。松开后重新按住，即使上一段桌面动画尚未结束，也会立即发送下一次或反方向动作。这个模型来自对 `logioptionsplus_agent` 的实际采样：左右切换分别是一次 `Control + Left/Right Arrow`，没有 Dock-swipe 进度或速度事件。
 
 ## 其他
 
@@ -80,7 +81,7 @@ macOS 菜单栏小工具，做三件事：
 make app        # 编译 + 组装 .app + 签名 → build/Open Mouse.app
 make run        # 上面这些，然后启动
 make install    # 拷到 /Applications 并启动（登录项注册需要装在这里）
-make test       # 跑 143 项内置自检
+make test       # 跑全部内置自检
 make dist       # 打包 zip
 ```
 
@@ -98,11 +99,10 @@ OpenMouse --tab buttons    # 启动即打开指定设置页（scroll/buttons/app
 
 ## 已知限制
 
-- **未实现 HID++ 层** —— Logitech 的 SmartShift、硬件 DPI 档位、高分辨率滚轮开关只能通过 HID++ 拿到，`CGEventTap` 看不见，而且需要额外的输入监控权限
+- **HID++ 当前聚焦可编程按钮** —— 已支持 Bolt / Unifying / 蓝牙直连设备的按钮识别与物理按住状态；SmartShift、硬件 DPI 档位和高分辨率滚轮开关尚未实现
 - **未做指针加速与 DPI 调节**（LinearMouse 覆盖这块）
-- 手势导航一次按住只触发一个动作
 - 界面目前只有中文文案，都在 `Strings.swift` 里
 - 没有做 Apple 公证
 - Mos 的「聚焦」（键码 177）与「听写」（176）在 macOS 26.6 上实测已失效，故未收入
 
-MIT License。
+MIT License。第三方代码声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

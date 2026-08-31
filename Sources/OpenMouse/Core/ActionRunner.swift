@@ -47,8 +47,10 @@ struct ActionRunner {
         case functionKey(SystemHotkeys.FunctionKey)
         /// Media and volume keys, which are not key codes at all.
         case aux(AuxKey)
-        /// Desktop switches, which must be paced: the system *discards* one requested while a
-        /// space transition is animating.
+        /// Direct desktop-switch actions selected as ordinary button bindings retain the legacy
+        /// queue. Gesture navigation deliberately bypasses it: a Logi Options+ trace on
+        /// 2026-08-31 showed one immediate Control+Arrow stroke per physical hold, including
+        /// when a previous Space animation was still running.
         case paced
         case custom(KeyCombo)
         case launch(String)
@@ -175,6 +177,24 @@ struct ActionRunner {
         DispatchQueue.main.async { self.run(action) }
     }
 
+    /// Match Logi Options+' gesture-button delivery rather than the separately bound desktop
+    /// actions: the first direction recognised in each physical hold posts immediately, without
+    /// waiting behind `SpaceSwitchPacer`. Re-pressing during an in-flight animation therefore
+    /// sends a fresh Control+Arrow stroke right away.
+    func runGestureNavigationAsync(_ action: MouseAction) {
+        DispatchQueue.main.async { self.runGestureNavigation(action) }
+    }
+
+    func runGestureNavigation(_ action: MouseAction) {
+        switch action {
+        case .spaceLeft, .spaceRight:
+            MainActor.assumeIsolated { SpaceSwitchPacer.shared.cancel() }
+            postWithoutPacing(action)
+        default:
+            run(action)
+        }
+    }
+
     func run(_ action: MouseAction) {
         let stroke = Self.stroke(for: action)
         if stroke == .paced {
@@ -188,7 +208,14 @@ struct ActionRunner {
     func postWithoutPacing(_ action: MouseAction) {
         guard Self.stroke(for: action) == .paced else { return }
         let hotkey: SystemHotkeys.Symbolic = action == .spaceLeft ? .spaceLeft : .spaceRight
-        perform(.systemHotkey(hotkey), describing: action)
+        guard case let .stroke(stroke) = SystemHotkeys.resolve(hotkey) else {
+            Trace.actionUnavailable(
+                action: "\(action)",
+                reason: "系统快捷键已在「系统设置 › 键盘 › 快捷键」中被关闭"
+            )
+            return
+        }
+        gestureSpaceKeyStroke(stroke.keyCode, flags: stroke.flags)
     }
 
     private func perform(_ stroke: Stroke, describing action: MouseAction) {
@@ -315,6 +342,36 @@ struct ActionRunner {
         SyntheticEventTag.mark(up)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    /// Reproduce the event shape captured from `logioptionsplus_agent` for desktop gestures:
+    /// Control+Fn+Arrow down, Fn+Arrow up, then a flags-changed edge that clears Fn. The system
+    /// reacts to the first edge; preserving the full sequence avoids leaving synthetic modifier
+    /// state behind and makes a second physical hold valid during the first Space animation.
+    static func gestureSpaceEvents(
+        keyCode: UInt16,
+        flags: CGEventFlags,
+        source: CGEventSource?
+    ) -> [CGEvent]? {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false),
+              let clear = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+        else { return nil }
+        down.flags = flags
+        up.flags = flags.intersection(.maskSecondaryFn)
+        clear.type = .flagsChanged
+        clear.flags = []
+        for event in [down, up, clear] { SyntheticEventTag.mark(event) }
+        return [down, up, clear]
+    }
+
+    private func gestureSpaceKeyStroke(_ keyCode: UInt16, flags: CGEventFlags) {
+        guard let events = Self.gestureSpaceEvents(
+            keyCode: keyCode,
+            flags: flags,
+            source: source
+        ) else { return }
+        for event in events { event.post(tap: .cghidEventTap) }
     }
 
     /// Build one media-key edge without posting it, so the marker invariant is testable.

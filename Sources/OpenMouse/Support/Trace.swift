@@ -69,4 +69,12 @@ enum Trace {
     static func recognized(direction: String, action: String) {
         gesture.notice("recognized \(direction, privacy: .public) → \(action, privacy: .public)")
     }
+
+    static func interactiveGestureBegan(axis: String, delta: Double) {
+        gesture.notice("interactive dock swipe began axis=\(axis, privacy: .public) initialDelta=\(delta, format: .fixed(precision: 1))")
+    }
+
+    static func interactiveGestureEnded(progress: Double, exitSpeed: Double, cancelled: Bool) {
+        gesture.notice("interactive dock swipe ended progress=\(progress, format: .fixed(precision: 3)) exitSpeed=\(exitSpeed, format: .fixed(precision: 2)) cancelled=\(cancelled)")
+    }
 }
