@@ -2,11 +2,9 @@ import Foundation
 
 /// Checks GitHub Releases for a newer build without using the rate-limited REST API.
 ///
-/// Deliberately not Sparkle: Sparkle needs an EdDSA key pair, a hosted appcast and a signed
-/// archive per release. This app is distributed as a repo you build yourself, so the honest
-/// mechanism is "follow GitHub's latest-release redirect, compare its tag, then point at that
-/// page". No API token, no auto-install, no update keys to lose, and nothing running with
-/// elevated rights.
+/// Discovery follows GitHub's normal latest-release redirect rather than the rate-limited API.
+/// Installation uses the matching release asset and requires the downloaded application's code
+/// signature to satisfy the currently installed application's designated requirement.
 enum UpdateChecker {
     struct Release: Codable, Equatable, Sendable {
         var version: String
@@ -23,30 +21,49 @@ enum UpdateChecker {
     /// Compares dotted numeric versions, ignoring a leading `v` and any suffix.
     /// `1.10.0` sorts above `1.9.9`, which a string comparison would get wrong.
     static func isNewer(_ candidate: String, than current: String) -> Bool? {
-        func parts(_ text: String) -> [UInt64]? {
-            var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)[...]
-            if trimmed.first == "v" || trimmed.first == "V" { trimmed.removeFirst() }
-            // Stop at the first suffix component so "1.2.0-beta.3" compares as 1.2.0, but
-            // reject empty/overflowing numeric components instead of compacting them away.
-            let core = trimmed.prefix { $0.isNumber || $0 == "." }
-            guard !core.isEmpty else { return nil }
-            let components = core.split(separator: ".", omittingEmptySubsequences: false)
-            guard !components.isEmpty else { return nil }
-            var result: [UInt64] = []
-            result.reserveCapacity(components.count)
-            for component in components {
-                guard !component.isEmpty, let value = UInt64(component) else { return nil }
-                result.append(value)
-            }
-            return result
-        }
-        guard let lhs = parts(candidate), let rhs = parts(current) else { return nil }
+        guard let lhs = versionParts(candidate), let rhs = versionParts(current) else { return nil }
         for index in 0..<max(lhs.count, rhs.count) {
             let l = index < lhs.count ? lhs[index] : 0
             let r = index < rhs.count ? rhs[index] : 0
             if l != r { return l > r }
         }
         return false
+    }
+
+    static func versionsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        guard let left = versionParts(lhs), let right = versionParts(rhs) else { return false }
+        let count = max(left.count, right.count)
+        return (0..<count).allSatisfy { index in
+            (index < left.count ? left[index] : 0) == (index < right.count ? right[index] : 0)
+        }
+    }
+
+    private static func versionParts(_ text: String) -> [UInt64]? {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)[...]
+        if trimmed.first == "v" || trimmed.first == "V" { trimmed.removeFirst() }
+        // Stop at the first suffix component so "1.2.0-beta.3" compares as 1.2.0, but
+        // reject empty/overflowing numeric components instead of compacting them away.
+        let core = trimmed.prefix { $0.isNumber || $0 == "." }
+        guard !core.isEmpty else { return nil }
+        let components = core.split(separator: ".", omittingEmptySubsequences: false)
+        guard !components.isEmpty else { return nil }
+        var result: [UInt64] = []
+        result.reserveCapacity(components.count)
+        for component in components {
+            guard !component.isEmpty, let value = UInt64(component) else { return nil }
+            result.append(value)
+        }
+        return result
+    }
+
+    private static func archiveVersion(_ tag: String) -> String? {
+        var version = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        if version.first == "v" || version.first == "V" { version.removeFirst() }
+        let components = version.split(separator: ".", omittingEmptySubsequences: false)
+        guard !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }),
+              versionParts(version) != nil else { return nil }
+        return version
     }
 
     private static func repositoryComponents(_ repository: String) -> [String]? {
@@ -68,6 +85,22 @@ enum UpdateChecker {
             .appending(path: components[1])
             .appending(path: "releases")
             .appending(path: "latest")
+    }
+
+    /// Release assets follow the repository's documented `OpenMouse-x.y.z.zip` convention.
+    static func archiveURL(for release: Release, repository: String) -> URL? {
+        guard let components = repositoryComponents(repository),
+              let canonicalRelease = self.release(from: release.url, repository: repository),
+              canonicalRelease.version == release.version,
+              let version = archiveVersion(release.version),
+              let github = URL(string: "https://github.com") else { return nil }
+        return github
+            .appending(path: components[0])
+            .appending(path: components[1])
+            .appending(path: "releases")
+            .appending(path: "download")
+            .appending(path: release.version)
+            .appending(path: "OpenMouse-\(version).zip")
     }
 
     /// Extracts the tag only from the expected repository's final GitHub release URL. Keeping

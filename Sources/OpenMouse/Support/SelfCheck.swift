@@ -224,6 +224,7 @@ enum SelfCheck {
             updateRequestHasHardResourceDeadline()
             skippedReleaseIsFiltered()
             parsesReleaseRedirect()
+            constructsReleaseArchiveURL()
             rejectsUnexpectedReleaseURLs()
         }
 
@@ -2676,6 +2677,32 @@ enum SelfCheck {
         }
         expect(release.version == "v0.2.0", "解析出版本标签")
         expect(release.url.host == "github.com", "解析出发布页地址")
+    }
+
+    private static func constructsReleaseArchiveURL() {
+        guard let releaseURL = URL(string: "https://github.com/owner/repo/releases/tag/v1.2.3") else {
+            expect(false, "测试发布地址有效")
+            return
+        }
+        let release = UpdateChecker.Release(version: "v1.2.3", url: releaseURL)
+        expect(
+            UpdateChecker.archiveURL(for: release, repository: "owner/repo")?.absoluteString
+                == "https://github.com/owner/repo/releases/download/v1.2.3/OpenMouse-1.2.3.zip",
+            "发布标签映射到约定的 GitHub Release 资源"
+        )
+        expect(UpdateChecker.versionsMatch("v1.2", "1.2.0"), "更新包版本比较允许省略尾部零")
+
+        let unsafe = UpdateChecker.Release(version: "v1.2.3/other", url: releaseURL)
+        expect(
+            UpdateChecker.archiveURL(for: unsafe, repository: "owner/repo") == nil,
+            "资源下载地址拒绝标签与发布页不一致或包含路径的版本"
+        )
+        let otherURL = URL(string: "https://github.com/other/repo/releases/tag/v1.2.3")!
+        let other = UpdateChecker.Release(version: "v1.2.3", url: otherURL)
+        expect(
+            UpdateChecker.archiveURL(for: other, repository: "owner/repo") == nil,
+            "资源下载地址只接受配置仓库的发布页"
+        )
     }
 
     private static func rejectsUnexpectedReleaseURLs() {

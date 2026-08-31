@@ -202,9 +202,8 @@ private struct LiveCounters: View {
     }
 }
 
-/// Update checking. Deliberately read-only: it reports what the latest release is and links
-/// to it. No self-installing updater means no update keys to protect and nothing running
-/// with elevated privileges.
+/// Update checking and installation. The independent helper only runs during an update and
+/// verifies the candidate against the current application's designated requirement twice.
 private struct UpdateSection: View {
     @State private var store = SettingsStore.shared
     @State private var updates = UpdateCoordinator.shared
@@ -227,7 +226,7 @@ private struct UpdateSection: View {
                     Task { await updates.check(userInitiated: true) }
                 }
                 .controlSize(.small)
-                .disabled(updates.isChecking)
+                .disabled(updates.isChecking || updates.installationState.isBusy)
 
                 if updates.isChecking {
                     ProgressView().controlSize(.small)
@@ -248,6 +247,35 @@ private struct UpdateSection: View {
 
     @ViewBuilder
     private var outcomeRow: some View {
+        switch updates.installationState {
+        case let .downloading(version):
+            updateProgress(Strings.updateDownloading(version))
+        case let .installing(version):
+            updateProgress(Strings.updateInstalling(version))
+        case let .installed(version):
+            Label(Strings.updateInstalled(version), systemImage: "checkmark.circle.fill")
+                .font(.callout)
+                .foregroundStyle(.green)
+        case let .failed(message):
+            VStack(alignment: .leading, spacing: 8) {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let release = updates.pendingRelease {
+                    Button(Strings.updateInstallRetry) {
+                        Task { await updates.install(release) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+        case .idle:
+            checkOutcomeRow
+        }
+    }
+
+    @ViewBuilder
+    private var checkOutcomeRow: some View {
         switch updates.outcome {
         case nil:
             EmptyView()
@@ -271,15 +299,28 @@ private struct UpdateSection: View {
                         .font(.headline)
                         .foregroundStyle(.tint)
                     HStack(spacing: 8) {
-                        Button(Strings.updateOpen) { updates.open(release) }
+                        Button(Strings.updateInstall) {
+                            Task { await updates.install(release) }
+                        }
                             .controlSize(.small)
                             .buttonStyle(.borderedProminent)
+                        Button(Strings.updateOpen) { updates.open(release) }
+                            .controlSize(.small)
                         Button(Strings.updateSkip) { updates.skip(release) }
                             .controlSize(.small)
                     }
                 }
                 .padding(.vertical, 2)
             }
+        }
+    }
+
+    private func updateProgress(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 }

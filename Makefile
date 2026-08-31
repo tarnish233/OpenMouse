@@ -3,7 +3,7 @@ VERSION := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString"
 APP := build/$(APP_NAME).app
 INSTALL_DIR := /Applications
 
-.PHONY: all build app run install reinstall debug test dist clean tcc-reset
+.PHONY: all build app run install reinstall debug test dist dist-community clean tcc-reset
 
 all: app
 
@@ -34,12 +34,22 @@ install: app
 ## Run the built-in logic checks
 test:
 	swift run -c debug OpenMouse --self-check
+	swift run -c debug OpenMouseUpdater --self-check
 	./Scripts/test-distribution-signature.sh
+	./Scripts/test-community-signature.sh
 
 ## Zip the signed bundle for a GitHub release.
 ## ditto, not zip: it preserves the bundle's signature and resource forks.
 dist:
 	DISTRIBUTION=1 ./Scripts/bundle.sh
+	rm -f "build/OpenMouse-$(VERSION).zip"
+	ditto -c -k --sequesterRsrc --keepParent "$(APP)" "build/OpenMouse-$(VERSION).zip"
+	@shasum -a 256 "build/OpenMouse-$(VERSION).zip"
+
+## Zip a stable Apple Development-signed build when Developer ID is unavailable.
+## It is not notarized, so Gatekeeper still warns on first install.
+dist-community:
+	COMMUNITY_DISTRIBUTION=1 ./Scripts/bundle.sh
 	rm -f "build/OpenMouse-$(VERSION).zip"
 	ditto -c -k --sequesterRsrc --keepParent "$(APP)" "build/OpenMouse-$(VERSION).zip"
 	@shasum -a 256 "build/OpenMouse-$(VERSION).zip"

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Observation
 
 /// Pure scheduling/presentation rules shared by the coordinator and self-checks.
@@ -30,11 +31,27 @@ enum UpdatePolicy {
 @MainActor
 @Observable
 final class UpdateCoordinator {
+    enum InstallationState: Equatable {
+        case idle
+        case downloading(String)
+        case installing(String)
+        case installed(String)
+        case failed(String)
+
+        var isBusy: Bool {
+            switch self {
+            case .downloading, .installing: true
+            case .idle, .installed, .failed: false
+            }
+        }
+    }
+
     static let shared = UpdateCoordinator()
 
     private(set) var outcome: UpdateChecker.Outcome?
     private(set) var isChecking = false
     private(set) var lastCheckedAt: Date?
+    private(set) var installationState: InstallationState = .idle
 
     private var store: SettingsStore { SettingsStore.shared }
     private var automaticTimer: Timer?
@@ -51,6 +68,18 @@ final class UpdateCoordinator {
             outcome: outcome,
             skippedVersion: store.preferences.update.skippedVersion
         )
+    }
+
+    /// Restores the result passed back by the independent updater after it relaunches us.
+    func consumeUpdaterLaunchResult(arguments: [String] = CommandLine.arguments) {
+        if let version = Self.argumentValue(after: "--update-installed", in: arguments) {
+            installationState = .installed(version)
+            outcome = .upToDate(current: version)
+            store.preferences.update.lastKnownRelease = nil
+            store.preferences.update.skippedVersion = nil
+        } else if let message = Self.argumentValue(after: "--update-error", in: arguments) {
+            installationState = .failed(message)
+        }
     }
 
     /// Start a real-time schedule, not a one-shot launch check. The next due date is restored
@@ -100,7 +129,7 @@ final class UpdateCoordinator {
         automaticTimer?.invalidate()
         automaticTimer = nil
         guard store.preferences.update.checkAutomatically else { return }
-        guard automaticCheckTask == nil, !isChecking else { return }
+        guard automaticCheckTask == nil, !isChecking, !installationState.isBusy else { return }
 
         let due = max(
             UpdatePolicy.dueDate(
@@ -122,7 +151,7 @@ final class UpdateCoordinator {
     }
 
     private func launchAutomaticCheck() {
-        guard automaticCheckTask == nil, !isChecking else { return }
+        guard automaticCheckTask == nil, !isChecking, !installationState.isBusy else { return }
         automaticCheckTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.check(userInitiated: false)
@@ -132,7 +161,7 @@ final class UpdateCoordinator {
     }
 
     func check(userInitiated: Bool) async {
-        guard !isChecking else { return }
+        guard !isChecking, !installationState.isBusy else { return }
         isChecking = true
 
         let result = await UpdateChecker.check(
@@ -168,10 +197,38 @@ final class UpdateCoordinator {
     }
 
     func skip(_ release: UpdateChecker.Release) {
+        guard !installationState.isBusy else { return }
         store.preferences.update.skippedVersion = release.version
+    }
+
+    func install(_ release: UpdateChecker.Release) async {
+        guard !installationState.isBusy else { return }
+        installationState = .downloading(release.version)
+
+        do {
+            let prepared = try await UpdateInstaller.prepare(
+                release: release,
+                repository: UpdateSettings.repository,
+                currentBundleURL: Bundle.main.bundleURL
+            )
+            installationState = .installing(prepared.version)
+            store.saveNow()
+            try UpdateInstaller.launch(prepared, parentPID: getpid())
+            NSApp.terminate(nil)
+        } catch {
+            installationState = .failed(error.localizedDescription)
+            reconcileAutomaticSchedule()
+        }
     }
 
     func open(_ release: UpdateChecker.Release) {
         NSWorkspace.shared.open(release.url)
+    }
+
+    private static func argumentValue(after flag: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 }
