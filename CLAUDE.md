@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检 229 项 + 发布签名脚本检查 6 项，必须全过
+make test     # 内置自检 230 项 + 发布签名脚本检查 6 项，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -156,6 +156,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 - 跨线程共享状态统一走 `Locked`（`OSAllocatedUnfairLock`）：配置快照、动画状态、滤波器、计数器。
 - 界面文案全部集中在 `Strings.swift`，目前只有中文。
 - 设置界面遵循 `macos-settings-ui` skill 的写法（`NSWindowController` + `.fullSizeContentView` + 透明 `Form`）。
+- 应用级 `.custom` 规则必须能编辑 `ScrollSettings` 的全部存储字段；`AppRuleScrollField` 与编码键的自检负责在模型扩字段时阻止 UI 静默漏项。
 - 状态栏图标同时由总开关和 `MouseEngine.status` 决定，必须通过 Observation 持续订阅两者；只在菜单动作里手动刷新会漏掉启动、权限变化和 tap 失败/恢复。
 - 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询；任何离开运行态的分支都通过同一个 teardown 同时停止主 tap、motion tap、会话与轮询。
 - 偏好变化只有在主 tap 的事件掩码发生变化时才允许重建监听；滚动参数、应用规则等快照更新不能中断正在进行的手势。主 tap 创建失败不是终态，必须安排有限间隔的重试并在离开失败态时取消定时器。

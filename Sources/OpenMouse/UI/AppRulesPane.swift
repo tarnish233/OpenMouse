@@ -1,6 +1,24 @@
 import AppKit
 import SwiftUI
 
+/// Every stored scroll field must have a control in the per-app custom editor. The editor
+/// iterates this list and switches exhaustively, while self-checks compare the raw values to
+/// `ScrollSettings`' encoded keys so a future model field cannot silently become global-only.
+enum AppRuleScrollField: String, CaseIterable, Identifiable {
+    case smoothingEnabled
+    case reverseVertical
+    case reverseHorizontal
+    case minimumStep
+    case speed
+    case smoothness
+    case acceleration
+    case reverseContinuousDevices
+    case affectContinuousDevices
+    case emitScrollPhases
+
+    var id: Self { self }
+}
+
 struct AppRulesPane: View {
     @State private var store = SettingsStore.shared
 
@@ -76,31 +94,7 @@ private struct AppRuleSection: View {
             if rule.mode == .custom {
                 Toggle(Strings.appsBypassButtons, isOn: $rule.bypassButtons)
                     .toggleStyle(.switch)
-                Toggle(Strings.scrollEnableSmoothing, isOn: $rule.scroll.smoothingEnabled)
-                    .toggleStyle(.switch)
-                Toggle(Strings.scrollReverseVertical, isOn: $rule.scroll.reverseVertical)
-                    .toggleStyle(.switch)
-                CompactSlider(
-                    title: Strings.scrollMinimumStep,
-                    value: $rule.scroll.minimumStep,
-                    range: 4...120,
-                    step: 0.2,
-                    format: { String(format: "%.1f px", $0) }
-                )
-                CompactSlider(
-                    title: Strings.scrollSpeed,
-                    value: $rule.scroll.speed,
-                    range: 0.5...8,
-                    step: 0.05,
-                    format: { String(format: "%.2f×", $0) }
-                )
-                CompactSlider(
-                    title: Strings.scrollSmoothness,
-                    value: $rule.scroll.smoothness,
-                    range: 0...ScrollSettings.maxSmoothness,
-                    step: 0.005,
-                    format: { String(format: "%.0f%%", $0 * 100) }
-                )
+                AppRuleScrollControls(scroll: $rule.scroll)
             }
         } header: {
             HStack(spacing: 8) {
@@ -119,6 +113,74 @@ private struct AppRuleSection: View {
                 .buttonStyle(.borderless)
             }
             .textCase(nil)
+        }
+    }
+}
+
+private struct AppRuleScrollControls: View {
+    @Binding var scroll: ScrollSettings
+
+    var body: some View {
+        ForEach(AppRuleScrollField.allCases) { field in
+            control(for: field)
+        }
+    }
+
+    @ViewBuilder
+    private func control(for field: AppRuleScrollField) -> some View {
+        switch field {
+        case .smoothingEnabled:
+            Toggle(Strings.scrollEnableSmoothing, isOn: $scroll.smoothingEnabled)
+                .toggleStyle(.switch)
+        case .reverseVertical:
+            Toggle(Strings.scrollReverseVertical, isOn: $scroll.reverseVertical)
+                .toggleStyle(.switch)
+        case .reverseHorizontal:
+            Toggle(Strings.scrollReverseHorizontal, isOn: $scroll.reverseHorizontal)
+                .toggleStyle(.switch)
+        case .minimumStep:
+            CompactSlider(
+                title: Strings.scrollMinimumStep,
+                value: $scroll.minimumStep,
+                range: 4...120,
+                step: 0.2,
+                format: { String(format: "%.1f px", $0) }
+            )
+        case .speed:
+            CompactSlider(
+                title: Strings.scrollSpeed,
+                value: $scroll.speed,
+                range: 0.5...8,
+                step: 0.05,
+                format: { String(format: "%.2f×", $0) }
+            )
+        case .smoothness:
+            CompactSlider(
+                title: Strings.scrollSmoothness,
+                value: $scroll.smoothness,
+                range: 0...ScrollSettings.maxSmoothness,
+                step: 0.005,
+                format: { String(format: "%.0f%%", $0 * 100) }
+            )
+            .disabled(!scroll.smoothingEnabled)
+        case .acceleration:
+            CompactSlider(
+                title: Strings.scrollAcceleration,
+                value: $scroll.acceleration,
+                range: 1...6,
+                step: 0.1,
+                format: { String(format: "%.1f×", $0) }
+            )
+            .disabled(!scroll.smoothingEnabled)
+        case .reverseContinuousDevices:
+            Toggle(Strings.scrollReverseTrackpad, isOn: $scroll.reverseContinuousDevices)
+                .toggleStyle(.switch)
+        case .affectContinuousDevices:
+            Toggle(Strings.scrollSmoothTrackpad, isOn: $scroll.affectContinuousDevices)
+                .toggleStyle(.switch)
+        case .emitScrollPhases:
+            Toggle(Strings.scrollEmitPhases, isOn: $scroll.emitScrollPhases)
+                .toggleStyle(.switch)
         }
     }
 }

@@ -67,6 +67,7 @@ enum SelfCheck {
             masterSwitchWins()
             scrollRulesFollowEventTarget()
             statusMenuTogglesBypassRule()
+            appRuleEditorCoversEveryScrollField()
         }
         group("按键映射") {
             defaultAction()
@@ -608,6 +609,32 @@ enum SelfCheck {
                 && prefs.rules[0].scroll.speed == prefs.scroll.speed,
             "没有既有规则时状态菜单会创建继承全局滚动参数的 bypass 规则"
         )
+    }
+
+    private static func appRuleEditorCoversEveryScrollField() {
+        do {
+            let data = try JSONEncoder().encode(ScrollSettings())
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                expect(false, "可读取 ScrollSettings 的编码字段")
+                return
+            }
+            let storedFields = Set(object.keys)
+            let editableFields = Set(AppRuleScrollField.allCases.map(\.rawValue))
+            let missing = storedFields.subtracting(editableFields).sorted()
+            let stale = editableFields.subtracting(storedFields).sorted()
+            let details = [
+                missing.isEmpty ? nil : "缺少：\(missing.joined(separator: "、"))",
+                stale.isEmpty ? nil : "多余：\(stale.joined(separator: "、"))"
+            ].compactMap { $0 }.joined(separator: "；")
+            expect(
+                storedFields == editableFields,
+                details.isEmpty
+                    ? "应用自定义规则编辑器覆盖 ScrollSettings 全部 \(storedFields.count) 个字段"
+                    : "应用自定义规则编辑器与 ScrollSettings 不一致（\(details)）"
+            )
+        } catch {
+            expect(false, "检查应用规则滚动字段时编码失败：\(error)")
+        }
     }
 
     private static func bypassRule() {
