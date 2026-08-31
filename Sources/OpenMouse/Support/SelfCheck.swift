@@ -65,6 +65,7 @@ enum SelfCheck {
             bypassRule()
             customRule()
             masterSwitchWins()
+            scrollRulesFollowEventTarget()
         }
         group("按键映射") {
             defaultAction()
@@ -574,14 +575,14 @@ enum SelfCheck {
     private static func globalFallback() {
         var prefs = Preferences()
         prefs.scroll.speed = 7.7
-        let config = ResolvedConfig(preferences: prefs, frontmostBundleID: "com.apple.Safari")
+        let config = ResolvedConfig(preferences: prefs, bundleID: "com.apple.Safari")
         expect(config.active && config.scroll.speed == 7.7 && config.buttonsActive, "没有规则时使用全局设置")
     }
 
     private static func bypassRule() {
         var prefs = Preferences()
         prefs.rules = [AppRule(bundleID: "com.apple.Terminal", name: "Terminal", mode: .bypass)]
-        let config = ResolvedConfig(preferences: prefs, frontmostBundleID: "com.apple.Terminal")
+        let config = ResolvedConfig(preferences: prefs, bundleID: "com.apple.Terminal")
         expect(!config.active && !config.buttonsActive, "bypass 规则会完全放行该应用")
     }
 
@@ -593,8 +594,8 @@ enum SelfCheck {
         rule.bypassButtons = true
         prefs.rules = [rule]
 
-        let matched = ResolvedConfig(preferences: prefs, frontmostBundleID: "com.figma.Desktop")
-        let other = ResolvedConfig(preferences: prefs, frontmostBundleID: "com.apple.Safari")
+        let matched = ResolvedConfig(preferences: prefs, bundleID: "com.figma.Desktop")
+        let other = ResolvedConfig(preferences: prefs, bundleID: "com.apple.Safari")
         expect(matched.scroll.minimumStep == 120 && !matched.buttonsActive, "自定义规则只作用于匹配的应用")
         expect(other.scroll.minimumStep == 40 && other.buttonsActive, "其他应用不受影响")
     }
@@ -602,7 +603,73 @@ enum SelfCheck {
     private static func masterSwitchWins() {
         var prefs = Preferences()
         prefs.enabled = false
-        expect(!ResolvedConfig(preferences: prefs, frontmostBundleID: nil).active, "总开关优先于所有规则")
+        expect(!ResolvedConfig(preferences: prefs, bundleID: nil).active, "总开关优先于所有规则")
+    }
+
+    /// Per-app scroll rules must use the annotated target process, not whichever app happens
+    /// to be frontmost while the pointer is over a background window.
+    private static func scrollRulesFollowEventTarget() {
+        var prefs = Preferences()
+        var frontRule = AppRule(bundleID: "com.example.front", name: "Front", mode: .custom)
+        frontRule.scroll.reverseVertical = true
+        prefs.rules = [
+            frontRule,
+            AppRule(bundleID: "com.example.background", name: "Background", mode: .bypass)
+        ]
+
+        let resolver = ScrollRuleResolver()
+        resolver.updatePreferences(prefs)
+        resolver.replaceApplications([
+            (pid: 101, bundleID: "com.example.front"),
+            (pid: 202, bundleID: "com.example.background")
+        ])
+
+        let frontmost = ResolvedConfig(preferences: prefs, bundleID: "com.example.front")
+        let router = EventRouter(config: Locked(frontmost), scrollRules: resolver)
+        guard let backgroundEvent = scrollEvent(targetPID: 202),
+              let frontEvent = scrollEvent(targetPID: 101),
+              let unknownEvent = scrollEvent(targetPID: 303) else {
+            expect(false, "可构造带目标进程的滚动事件")
+            return
+        }
+
+        expect(
+            router.resolvedScrollConfig(for: backgroundEvent) == .inactive,
+            "后台 bypass 窗口按事件 target pid 解析规则，不误用前台 custom 规则"
+        )
+        expect(
+            router.resolvedScrollConfig(for: frontEvent).scroll.reverseVertical,
+            "目标进程命中自身 custom 规则"
+        )
+        expect(
+            router.resolvedScrollConfig(for: unknownEvent)
+                == ResolvedConfig(preferences: prefs, bundleID: nil),
+            "未知 pid 安全回落全局规则，不借用 frontmost 身份"
+        )
+
+        resolver.applicationDidTerminate(pid: 202)
+        expect(
+            router.resolvedScrollConfig(for: backgroundEvent).active,
+            "进程终止通知会移除 pid 缓存，避免 pid 复用后沿用旧规则"
+        )
+        resolver.applicationDidLaunch(pid: 202, bundleID: "com.example.background")
+        expect(
+            router.resolvedScrollConfig(for: backgroundEvent) == .inactive,
+            "进程启动通知可恢复 target pid 到 bundle id 的规则映射"
+        )
+    }
+
+    private static func scrollEvent(targetPID: pid_t) -> CGEvent? {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 1,
+            wheel1: 1,
+            wheel2: 0,
+            wheel3: 0
+        ) else { return nil }
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(targetPID))
+        return event
     }
 
     // MARK: Buttons

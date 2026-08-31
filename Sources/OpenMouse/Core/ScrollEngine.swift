@@ -38,9 +38,14 @@ struct ScrollEventPoster {
     /// Returns `nil` when the event carries no routable target. Callers must treat that as
     /// "do not swallow this event": there is nowhere to deliver a replacement, and a
     /// swallowed notch with no replacement is a dead scroll wheel.
+    static func targetPID(from event: CGEvent) -> pid_t? {
+        let raw = event.getIntegerValueField(.eventTargetUnixProcessID)
+        guard raw > 0, raw <= Int64(Int32.max) else { return nil }
+        return pid_t(raw)
+    }
+
     static func target(from event: CGEvent) -> Target? {
-        let pid = pid_t(event.getIntegerValueField(.eventTargetUnixProcessID))
-        guard pid > 0, let copy = event.copy() else { return nil }
+        guard let pid = targetPID(from: event), let copy = event.copy() else { return nil }
         return Target(event: copy, pid: pid)
     }
 

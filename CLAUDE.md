@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检（197 项，必须全过）
+make test     # 内置自检（202 项，必须全过）
 make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -74,7 +74,7 @@ OpenMouse --check-update owner/repo   # 走真实网络检查更新并退出
 10. **必须同时处理 `tapDisabledByTimeout` 和 `tapDisabledByUserInput`**：收到就 `CGEvent.tapEnable` 重开、写诊断，并经过同一个恢复钩子清掉可能丢失抬起的按键/手势会话。只处理其中一条会留下永久开启的 motion tap 或下一次移动误触发。
 11. **`Preferences` 及其子结构必须手写 `init(from:)` 逐字段降级。** Swift 合成的 `Decodable` 不使用属性默认值，少一个键就抛错——加一个字段会重置老用户的配置。目前 `ScrollSettings` / `KeyCombo` / `MouseAction` / `ButtonBinding` / `AppRule` / `UpdateSettings` / `Preferences` 都已覆盖；`buttons` 还必须逐元素容错，未知动作只降为 `.passthrough` 并在 `normalize()` 时移除自身，损坏的一行不能拖掉其余映射。见 `docs/code-review-2026-08-31.md` F3。
 12. **动作不能在 tap 回调里同步执行**，一律 `DispatchQueue.main.async`。回调超时会被系统停用 tap。
-13. **不要在 tap 回调里查最前面的应用**（IPC 往返）。缓存 `frontmostBundleID`，靠 `didActivateApplicationNotification` 失效。
+13. **不要在 tap 回调里查应用身份**（IPC 往返）。按键/UI 使用缓存的 `frontmostBundleID`；滚动规则必须按事件的 `eventTargetUnixProcessID` 经 `ScrollRuleResolver` 的 pid→bundleID 快照解析。快照只由 `didLaunch` / `didTerminate` 通知维护，回调里不得调用 `NSRunningApplication(processIdentifier:)`。
 14. **不要用全局键盘 tap 去探测键码**——那会捕获用户的真实输入。要验证按键是否有效，用「注入 + 读系统日志」（比如 `/usr/bin/log show --predicate 'subsystem == "com.apple.dock"'`）。注意**注入进程必须存活 ~400ms**，否则 WindowServer 不会处理队列——这会造成假阴性，我因此一次性误判了三个本来有效的按键。
 
 ## 代码分布

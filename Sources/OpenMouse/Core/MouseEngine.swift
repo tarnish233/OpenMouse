@@ -47,7 +47,7 @@ final class MouseEngine {
 
     private convenience init() {
         let store = SettingsStore.shared
-        let router = EventRouter(config: store.snapshot)
+        let router = EventRouter(config: store.snapshot, scrollRules: store.scrollRules)
         let tap = EventTapController(label: "main") { proxy, type, event in
             router.handle(proxy: proxy, type: type, event: event)
         }

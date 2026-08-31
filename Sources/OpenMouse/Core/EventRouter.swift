@@ -17,6 +17,7 @@ final class EventRouter {
     private let runAction: (MouseAction) -> Void
 
     private let config: Locked<ResolvedConfig>
+    private let scrollRules: ScrollRuleResolver?
     private let bindings = Locked<[ButtonBinding]>([])
     /// When set, button presses are reported here (with the modifiers held) and swallowed
     /// instead of being acted on, so the settings UI can record a binding from a real press.
@@ -46,9 +47,11 @@ final class EventRouter {
 
     init(
         config: Locked<ResolvedConfig>,
+        scrollRules: ScrollRuleResolver? = nil,
         runAction: @escaping (MouseAction) -> Void = { ActionRunner().runAsync($0) }
     ) {
         self.config = config
+        self.scrollRules = scrollRules
         self.runAction = runAction
         animator = ScrollAnimator(stats: stats)
     }
@@ -108,9 +111,9 @@ final class EventRouter {
     // MARK: - Scrolling
 
     private func handleScroll(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let config = config.value
-        guard config.active else { return Unmanaged.passUnretained(event) }
-        let settings = config.scroll
+        let resolved = resolvedScrollConfig(for: event)
+        guard resolved.active else { return Unmanaged.passUnretained(event) }
+        let settings = resolved.scroll
 
         // A continuous event means the device already reports pixel-level deltas:
         // a trackpad, a Magic Mouse, or a mouse with a hi-res driver. Those are smooth
@@ -127,6 +130,15 @@ final class EventRouter {
         }
         stats.withValue { $0.lastScrollUptime = now }
         return handleWheel(event, settings: settings)
+    }
+
+
+    /// Scroll rules follow the annotated process that will receive synthetic frames. Falling
+    /// back to the global rule on an unknown pid is safe; applying the frontmost app's rule to
+    /// a different background window is not.
+    func resolvedScrollConfig(for event: CGEvent) -> ResolvedConfig {
+        guard let scrollRules else { return config.value }
+        return scrollRules.resolve(targetPID: ScrollEventPoster.targetPID(from: event))
     }
 
     struct ContinuousScrollPolicy: Equatable {

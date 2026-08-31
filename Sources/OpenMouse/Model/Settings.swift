@@ -467,8 +467,8 @@ struct Preferences: Codable, Equatable, Sendable {
 
 // MARK: - Resolved snapshot
 
-/// A flattened, lock-free-friendly view of the preferences for one frontmost app.
-/// The event tap reads this on every scroll event, so it must stay a plain value.
+/// A flattened view of the preferences for one application identity.
+/// The event tap reads this on every event, so it must stay a plain value.
 struct ResolvedConfig: Equatable, Sendable {
     var active: Bool
     var scroll: ScrollSettings
@@ -482,12 +482,12 @@ struct ResolvedConfig: Equatable, Sendable {
         self.buttonsActive = buttonsActive
     }
 
-    init(preferences: Preferences, frontmostBundleID: String?) {
+    init(preferences: Preferences, bundleID: String?) {
         guard preferences.enabled else {
             self = .inactive
             return
         }
-        let rule = frontmostBundleID.flatMap { id in
+        let rule = bundleID.flatMap { id in
             preferences.rules.first { $0.bundleID == id }
         }
         switch rule?.mode {
