@@ -146,6 +146,8 @@ enum SelfCheck {
         group("更新检查") {
             hasDefaultUpdateSource()
             comparesVersions()
+            automaticScheduleUsesWallClock()
+            skippedReleaseIsFiltered()
             parsesRelease()
             rejectsBadPayload()
         }
@@ -1762,14 +1764,66 @@ enum SelfCheck {
     }
 
     private static func comparesVersions() {
-        expect(UpdateChecker.isNewer("1.0.1", than: "1.0.0"), "补丁号更大算新版本")
-        expect(UpdateChecker.isNewer("v1.2.0", than: "1.1.9"), "标签前的 v 会被忽略")
-        expect(UpdateChecker.isNewer("1.10.0", than: "1.9.9"), "按数值而不是字符串比较（1.10 > 1.9）")
-        expect(UpdateChecker.isNewer("1.1", than: "1.0.9"), "位数不同也能正确比较")
-        expect(!UpdateChecker.isNewer("1.0.0", than: "1.0.0"), "相同版本不算新")
-        expect(!UpdateChecker.isNewer("0.9.9", than: "1.0.0"), "更旧的版本不算新")
-        expect(!UpdateChecker.isNewer("乱码", than: "1.0.0"), "无法解析的版本号不会误报有更新")
-        expect(UpdateChecker.isNewer("1.2.0-beta.1", than: "1.1.0"), "预发布后缀被截断后仍可比较")
+        expect(UpdateChecker.isNewer("1.0.1", than: "1.0.0") == true, "补丁号更大算新版本")
+        expect(UpdateChecker.isNewer("v1.2.0", than: "1.1.9") == true, "标签前的 v 会被忽略")
+        expect(UpdateChecker.isNewer("1.10.0", than: "1.9.9") == true, "按数值而不是字符串比较（1.10 > 1.9）")
+        expect(UpdateChecker.isNewer("1.1", than: "1.0.9") == true, "位数不同也能正确比较")
+        expect(UpdateChecker.isNewer("1.0.0", than: "1.0.0") == false, "相同版本明确判为不更新")
+        expect(UpdateChecker.isNewer("0.9.9", than: "1.0.0") == false, "更旧的版本明确判为不更新")
+        expect(UpdateChecker.isNewer("1.2.0-beta.1", than: "1.1.0") == true, "预发布后缀被截断后仍可比较")
+
+        for invalid in ["stable", "release-1.2.0", "", "1..2", "18446744073709551616.1"] {
+            expect(
+                UpdateChecker.isNewer(invalid, than: "1.0.0") == nil,
+                "无法解析的版本号「\(invalid.isEmpty ? "空串" : invalid)」返回无法判断"
+            )
+        }
+        expect(
+            UpdateChecker.isNewer("1.2.0", than: AppVersion.unknown) == nil,
+            "当前应用版本未知时不会谎报已是最新"
+        )
+    }
+
+    private static func automaticScheduleUsesWallClock() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        expect(UpdatePolicy.isDue(lastCheckedAt: nil, now: now), "从未检查时立即到期")
+        expect(
+            !UpdatePolicy.isDue(lastCheckedAt: now.timeIntervalSince1970, now: now),
+            "刚检查完成时不会重复请求"
+        )
+        let almostDue = now.timeIntervalSince1970 - UpdatePolicy.automaticInterval + 1
+        expect(!UpdatePolicy.isDue(lastCheckedAt: almostDue, now: now), "未满 24 小时仍等待真实到期时间")
+        let due = now.timeIntervalSince1970 - UpdatePolicy.automaticInterval
+        expect(UpdatePolicy.isDue(lastCheckedAt: due, now: now), "进程持续运行满 24 小时后会到期")
+        expect(
+            UpdatePolicy.dueDate(lastCheckedAt: now.timeIntervalSince1970, now: now)
+                == now.addingTimeInterval(UpdatePolicy.automaticInterval),
+            "下一次唤醒按持久化检查时间安排，而不是只在启动时咨询一次"
+        )
+    }
+
+    private static func skippedReleaseIsFiltered() {
+        let release = UpdateChecker.Release(
+            version: "v9.9.9",
+            name: "Future",
+            notes: "",
+            url: URL(string: "https://github.com/owner/repo/releases/tag/v9.9.9")!,
+            publishedAt: nil,
+            isPrerelease: false
+        )
+        let outcome = UpdateChecker.Outcome.available(release)
+        expect(
+            UpdatePolicy.pendingRelease(outcome: outcome, skippedVersion: nil) == release,
+            "未跳过的新版本会显示"
+        )
+        expect(
+            UpdatePolicy.pendingRelease(outcome: outcome, skippedVersion: release.version) == nil,
+            "跳过此版本会被展示逻辑实际读取并隐藏横幅"
+        )
+        expect(
+            UpdatePolicy.pendingRelease(outcome: outcome, skippedVersion: "v9.9.8") == release,
+            "跳过旧版本不会隐藏后来发布的新版本"
+        )
     }
 
     private static func parsesRelease() {

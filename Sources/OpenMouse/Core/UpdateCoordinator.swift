@@ -1,6 +1,30 @@
 import AppKit
 import Observation
 
+/// Pure scheduling/presentation rules shared by the coordinator and self-checks.
+enum UpdatePolicy {
+    static let automaticInterval: TimeInterval = 24 * 60 * 60
+    static let retryInterval: TimeInterval = 60 * 60
+
+    static func dueDate(lastCheckedAt: Double?, now: Date) -> Date {
+        guard let lastCheckedAt else { return now }
+        return Date(timeIntervalSince1970: lastCheckedAt + automaticInterval)
+    }
+
+    static func isDue(lastCheckedAt: Double?, now: Date) -> Bool {
+        dueDate(lastCheckedAt: lastCheckedAt, now: now) <= now
+    }
+
+    static func pendingRelease(
+        outcome: UpdateChecker.Outcome?,
+        skippedVersion: String?
+    ) -> UpdateChecker.Release? {
+        guard case let .available(release) = outcome,
+              release.version != skippedVersion else { return nil }
+        return release
+    }
+}
+
 /// Owns update-check state for the UI: what the last check found, whether one is in flight,
 /// and the once-a-day automatic check.
 @MainActor
@@ -13,64 +37,133 @@ final class UpdateCoordinator {
     private(set) var lastCheckedAt: Date?
 
     private var store: SettingsStore { SettingsStore.shared }
-    /// Re-check no more than once a day; a menu bar utility has no business hitting the API
-    /// on every launch.
-    private let automaticInterval: TimeInterval = 24 * 60 * 60
+    private var automaticTimer: Timer?
+    private var automaticCheckTask: Task<Void, Never>?
+    private var wakeObserver: NSObjectProtocol?
+    private var didStartAutomaticScheduling = false
+    private var retryNotBefore: Date?
 
     private init() {}
 
     /// The release the user should be told about: newer, and not one they chose to skip.
     var pendingRelease: UpdateChecker.Release? {
-        guard case let .available(release) = outcome else { return nil }
-        guard release.version != store.preferences.update.skippedVersion else { return nil }
-        return release
+        UpdatePolicy.pendingRelease(
+            outcome: outcome,
+            skippedVersion: store.preferences.update.skippedVersion
+        )
     }
 
-    func startAutomaticCheckIfDue() {
-        let settings = store.preferences.update
-        guard settings.checkAutomatically else { return }
-
-        // Show what the last check found before deciding whether to make a new request, so
-        // the notice is present immediately on launch rather than only after a round trip.
-        if let known = settings.lastKnownRelease,
-           UpdateChecker.isNewer(known.version, than: AppVersion.short) {
-            outcome = .available(known)
-        }
-
-        if let last = settings.lastCheckedAt,
-           Date().timeIntervalSince1970 - last < automaticInterval {
-            lastCheckedAt = Date(timeIntervalSince1970: last)
+    /// Start a real-time schedule, not a one-shot launch check. The next due date is restored
+    /// from preferences, then re-evaluated after wake and whenever the automatic toggle changes.
+    func startAutomaticChecks() {
+        guard !didStartAutomaticScheduling else {
+            reconcileAutomaticSchedule()
             return
         }
-        Task { await check(userInitiated: false) }
+        didStartAutomaticScheduling = true
+        restoreKnownRelease()
+        observeAutomaticPreference()
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcileAutomaticSchedule() }
+        }
+        reconcileAutomaticSchedule()
+    }
+
+    private func restoreKnownRelease() {
+        let settings = store.preferences.update
+        if let last = settings.lastCheckedAt {
+            lastCheckedAt = Date(timeIntervalSince1970: last)
+        }
+        if let known = settings.lastKnownRelease,
+           UpdateChecker.isNewer(known.version, than: AppVersion.short) == true {
+            outcome = .available(known)
+        }
+    }
+
+    private func observeAutomaticPreference() {
+        withObservationTracking {
+            _ = store.preferences.update.checkAutomatically
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.reconcileAutomaticSchedule()
+                self.observeAutomaticPreference()
+            }
+        }
+    }
+
+    private func reconcileAutomaticSchedule(now: Date = Date()) {
+        automaticTimer?.invalidate()
+        automaticTimer = nil
+        guard store.preferences.update.checkAutomatically else { return }
+        guard automaticCheckTask == nil, !isChecking else { return }
+
+        let due = max(
+            UpdatePolicy.dueDate(
+                lastCheckedAt: store.preferences.update.lastCheckedAt,
+                now: now
+            ),
+            retryNotBefore ?? .distantPast
+        )
+        guard due > now else {
+            launchAutomaticCheck()
+            return
+        }
+
+        let timer = Timer(timeInterval: due.timeIntervalSince(now), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reconcileAutomaticSchedule() }
+        }
+        automaticTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func launchAutomaticCheck() {
+        guard automaticCheckTask == nil, !isChecking else { return }
+        automaticCheckTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.check(userInitiated: false)
+            self.automaticCheckTask = nil
+            self.reconcileAutomaticSchedule()
+        }
     }
 
     func check(userInitiated: Bool) async {
         guard !isChecking else { return }
         isChecking = true
-        defer { isChecking = false }
 
         let result = await UpdateChecker.check(
             repository: UpdateSettings.repository,
             currentVersion: AppVersion.short
         )
         outcome = result
+        isChecking = false
 
-        // Only a completed round trip counts, so a network failure does not silence the
-        // next automatic check for a whole day.
+        // Only a completed, comparable round trip counts, so a network/parse/version failure
+        // does not silence the next automatic check for a whole day.
         switch result {
         case .upToDate:
             let now = Date()
+            retryNotBefore = nil
             lastCheckedAt = now
             store.preferences.update.lastCheckedAt = now.timeIntervalSince1970
             store.preferences.update.lastKnownRelease = nil
         case let .available(release):
             let now = Date()
+            retryNotBefore = nil
             lastCheckedAt = now
             store.preferences.update.lastCheckedAt = now.timeIntervalSince1970
             store.preferences.update.lastKnownRelease = release
         case .failed, .notConfigured:
-            break
+            retryNotBefore = Date().addingTimeInterval(UpdatePolicy.retryInterval)
+        }
+
+        // A manual check also resets the next real-time wakeup.
+        if userInitiated || automaticCheckTask == nil {
+            reconcileAutomaticSchedule()
         }
     }
 

@@ -15,7 +15,7 @@
 | 2 | F3 | **已修复并核实**（自检 143 → 145 项） |
 | 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | **已复核并完成**（F4 核心结论驳回；自检 145 → 152 项） |
 | 4 | F7、F9、F10、F11 | **已修复并核实**（自检 152 → 183 项） |
-| 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | **进行中**（F8、F6、F12、C1、C2、C4 已修复；自检 183 → 202 项） |
+| 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | **进行中**（除 F15 外均已处理；自检 183 → 215 项） |
 
 第 1 批的核实方式：读代码确认锁序无反转（animator 锁 → ticker 锁，三个调用点方向一致）、真机 26 段滑行放大稳定在 9.6x 且无投递失败、空闲 CPU 0.0%。遗留的三点小问题记在 §6 末尾。
 
@@ -25,7 +25,7 @@
 
 第 4 批把「按下时的所有权」收成 `buttonClaims`，mouse-up 不再重新解析可变配置；`MouseEngine` 的 off / needsPermission / failed / stop 统一走 teardown，同时停止两条 tap、滚动、按键会话和权限轮询；两种系统禁用原因都经过同一恢复钩子；连续设备平滑、透传和无目标回退共用一份反向策略。release 构建通过，`make test` 183/183。
 
-第 5 批第一子批完成 F8、C1、C2、C4：未录入快捷键改用 `KeyCombo.unset` 且投递前拒绝；设置窗口通过幂等 activation lease 持有引用；版本读取失败显示「未知」；用户可写系统快捷键数值使用 exact narrowing。release 构建通过，`make test` 195/195。第二子批完成 F6：选择“不替用户猜斜划方向”，所有未形成主轴方向的输入在抬起时回落为手势按钮单击；自检 197/197。第三子批完成 F12：滚动规则按事件 target pid 经通知维护的 bundle-id 快照解析，未知 pid 回落全局规则，tap 回调不做 IPC；自检 202/202。
+第 5 批第一子批完成 F8、C1、C2、C4：未录入快捷键改用 `KeyCombo.unset` 且投递前拒绝；设置窗口通过幂等 activation lease 持有引用；版本读取失败显示「未知」；用户可写系统快捷键数值使用 exact narrowing。release 构建通过，`make test` 195/195。第二子批完成 F6：选择“不替用户猜斜划方向”，所有未形成主轴方向的输入在抬起时回落为手势按钮单击；自检 197/197。第三子批完成 F12：滚动规则按事件 target pid 经通知维护的 bundle-id 快照解析，未知 pid 回落全局规则，tap 回调不做 IPC；自检 202/202。第四子批完成 F13/F14：版本比较改为三态并拒绝损坏/溢出分量；自动检查按持久化时间设置真实定时器、唤醒后重算，失败仅做 1 小时内存退避；更新 UI 实际消费 `pendingRelease` 过滤跳过版本。自检 215/215。
 
 `CLAUDE.md` 里 §4 指出的两句假话已经改掉了（约束 11 的覆盖范围、测试一节声称的断言覆盖）。
 
@@ -58,8 +58,8 @@
 | F8 | `Model/ActionKind.swift:299` | 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母 | **已修复（第 5 批）** |
 | F6 | `Core/MouseGestureRecognizer.swift:106` | 10–40px 与所有斜划既不触发方向也不算单击，按键表现为坏了 | **已修复（第 5 批）** |
 | F12 | `Model/Settings.swift:381` | 应用规则按最前应用取，事件按 `postToPid` 投——两者不同一时规则用错进程 | **已修复（第 5 批）** |
-| F14 | `Core/UpdateCoordinator.swift:29` | 「每 24 小时」实际是「每次启动一次」；`跳过此版本` 写了个没人读的字段 | 已确认 |
-| F13 | `Core/UpdateChecker.swift:38` | 解析不出的版本号被报成「已是最新版本」 | 待确认 |
+| F14 | `Core/UpdateCoordinator.swift:29` | 「每 24 小时」实际是「每次启动一次」；`跳过此版本` 写了个没人读的字段 | **已修复（第 5 批）** |
+| F13 | `Core/UpdateChecker.swift:38` | 解析不出的版本号被报成「已是最新版本」 | **已修复（触发可控，但陷阱真实）** |
 | F15 | `Scripts/bundle.sh:41` | `make dist` 可能用开发证书签名，产出无法公证、别人打不开的包 | 已确认 |
 
 ---
@@ -404,7 +404,7 @@ let built = build() ?? [:]
 
 **第 5 批修复结果**：新增 `ScrollRuleResolver`，主线程启动时从 running applications 建表，并靠 `didLaunch` / `didTerminate` 更新 pid→bundleID；偏好变更同步刷新同一锁内快照。`EventRouter` 从 annotated event 取 target pid 后解析滚动配置，未知 pid 只回落全局规则，绝不借用 frontmost 身份。自检让前台应用为 custom、后台目标为 bypass，确认实际命中后台规则，并覆盖未知 pid、终止清理与重新启动映射。
 
-### F14 —— 「每 24 小时」实际是「每次启动一次」（已确认）
+### F14 —— 「每 24 小时」实际是「每次启动一次」（已确认；第 5 批已修复）
 
 **位置**：`Core/UpdateCoordinator.swift:29`（`startAutomaticCheckIfDue()`）、`:23`（`pendingRelease`）、唯一调用点 `App/AppDelegate.swift:14`
 
@@ -422,7 +422,9 @@ let built = build() ?? [:]
 
 **应补断言**：断言 `skippedVersion` 有实际读者（这条是可以静态检查的——`pendingRelease` 零调用本身就是信号）。
 
-### F13 —— 解析不出的版本号被报成「已是最新版本」（待确认）
+**第 5 批修复结果**：`startAutomaticChecks()` 恢复持久化检查时间并安排一次性 Timer，到期自动检查；系统 `didWake`、自动检查开关变化和手动检查完成都会重算下一次唤醒。网络/解析失败不写 `lastCheckedAt`，只做 1 小时进程内退避。设置 UI 的 available 分支改为读取 `updates.pendingRelease`，跳过当前版本会立即隐藏，后续新版本仍显示。自检钉住 24 小时真实时间边界和三种 skip 展示组合。
+
+### F13 —— 解析不出的版本号被报成「已是最新版本」（复核后修复）
 
 **位置**：`Core/UpdateChecker.swift:38`（`isNewer`）、`:95`（映射到 `.upToDate`）
 
@@ -439,6 +441,8 @@ let built = build() ?? [:]
 > 版本比较有三种结果：更新、不更新、**无法判断**。第三种绝不能呈现为「已是最新版本」，也不应该压制下一次重查。
 
 **应补断言**：把 `stable`、`release-1.2.0`、空串喂给 `isNewer`，断言结果不是「不更新」。
+
+**第 5 批复核与修复结果**：当前发布标签确实由维护者控制，所以这不是已经发生的用户故障；但三态缺失和 `compactMap` 左移溢出分量的代码陷阱真实存在，且 C2 的「未知」版本会直接触发。`isNewer` 现返回 `Bool?`，空、带非 v 前缀、空分量和 UInt64 溢出均为 nil；网络检查把 nil 映射为 `.failed`，不会写入 24 小时抑制时间。自检覆盖报告样例、空分量、溢出分量和当前版本未知。
 
 ### F15 —— `make dist` 可能用开发证书签名（已确认）
 

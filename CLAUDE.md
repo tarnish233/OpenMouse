@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检（202 项，必须全过）
+make test     # 内置自检（215 项，必须全过）
 make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -23,7 +23,7 @@ make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成�
 
 只想快速编译看有没有语法/类型错误：`swift build -c release`（不组装不签名，最快）。
 
-版本号的唯一来源是 `Resources/Info.plist` 的 `CFBundleShortVersionString`，`make dist` 从那里读。
+版本号的唯一来源是 `Resources/Info.plist` 的 `CFBundleShortVersionString`，`make dist` 从那里读。更新版本比较返回三态（新/不新/无法判断），无法解析时必须报失败且不能写入 24 小时抑制时间。自动检查由一次性定时器按持久化时间安排，并在系统唤醒后重新核对；不能只在启动时调用一次。
 
 ### 跑测试
 

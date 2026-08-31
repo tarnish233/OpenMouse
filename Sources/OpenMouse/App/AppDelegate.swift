@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MouseEngine.shared.start()
         ConflictMonitor.shared.start()
         KeyboardLayout.startObserving()
-        UpdateCoordinator.shared.startAutomaticCheckIfDue()
+        UpdateCoordinator.shared.startAutomaticChecks()
 
         if VerboseLogger.isRequested {
             VerboseLogger.shared.start()

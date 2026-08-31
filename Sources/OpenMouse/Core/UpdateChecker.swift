@@ -25,17 +25,25 @@ enum UpdateChecker {
 
     /// Compares dotted numeric versions, ignoring a leading `v` and any suffix.
     /// `1.10.0` sorts above `1.9.9`, which a string comparison would get wrong.
-    static func isNewer(_ candidate: String, than current: String) -> Bool {
-        func parts(_ text: String) -> [Int] {
-            let trimmed = text.trimmingCharacters(in: .whitespaces)
-                .drop { $0 == "v" || $0 == "V" }
-            // Stop at the first non-version component so "1.2.0-beta.3" compares as 1.2.0.
+    static func isNewer(_ candidate: String, than current: String) -> Bool? {
+        func parts(_ text: String) -> [UInt64]? {
+            var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)[...]
+            if trimmed.first == "v" || trimmed.first == "V" { trimmed.removeFirst() }
+            // Stop at the first suffix component so "1.2.0-beta.3" compares as 1.2.0, but
+            // reject empty/overflowing numeric components instead of compacting them away.
             let core = trimmed.prefix { $0.isNumber || $0 == "." }
-            return core.split(separator: ".").compactMap { Int($0) }
+            guard !core.isEmpty else { return nil }
+            let components = core.split(separator: ".", omittingEmptySubsequences: false)
+            guard !components.isEmpty else { return nil }
+            var result: [UInt64] = []
+            result.reserveCapacity(components.count)
+            for component in components {
+                guard !component.isEmpty, let value = UInt64(component) else { return nil }
+                result.append(value)
+            }
+            return result
         }
-        let lhs = parts(candidate)
-        let rhs = parts(current)
-        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        guard let lhs = parts(candidate), let rhs = parts(current) else { return nil }
         for index in 0..<max(lhs.count, rhs.count) {
             let l = index < lhs.count ? lhs[index] : 0
             let r = index < rhs.count ? rhs[index] : 0
@@ -92,9 +100,12 @@ enum UpdateChecker {
                 guard let release = parseRelease(data) else {
                     return .failed("无法解析发布信息")
                 }
-                return isNewer(release.version, than: currentVersion)
-                    ? .available(release)
-                    : .upToDate(current: currentVersion)
+                guard let isNewer = isNewer(release.version, than: currentVersion) else {
+                    return .failed(
+                        "无法比较版本号（当前：\(currentVersion)，发布：\(release.version)）"
+                    )
+                }
+                return isNewer ? .available(release) : .upToDate(current: currentVersion)
             case 404:
                 return .failed("仓库或发布不存在（404）")
             case 403:

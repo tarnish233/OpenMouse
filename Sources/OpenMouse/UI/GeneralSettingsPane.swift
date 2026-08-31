@@ -277,8 +277,9 @@ private struct UpdateSection: View {
                 .font(.callout)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
-        case let .available(release):
-            VStack(alignment: .leading, spacing: 8) {
+        case .available:
+            if let release = updates.pendingRelease {
+                VStack(alignment: .leading, spacing: 8) {
                 Label(Strings.updateAvailable(release.version), systemImage: "arrow.down.circle.fill")
                     .font(.headline)
                     .foregroundStyle(.tint)
@@ -296,8 +297,9 @@ private struct UpdateSection: View {
                     Button(Strings.updateSkip) { updates.skip(release) }
                         .controlSize(.small)
                 }
+                }
+                .padding(.vertical, 2)
             }
-            .padding(.vertical, 2)
         }
     }
 }
