@@ -15,20 +15,27 @@ import Foundation
 enum KeyboardLayout {
     /// ANSI/QWERTY positions, used only when the live layout cannot answer.
     ///
-    /// Not a preference — a last resort. A layout where a character needs a modifier to type
-    /// has no unmodified key code for it, and sending the ANSI position is more likely to be
-    /// right than sending nothing.
+    /// Every `.character` action must have an entry here. This is intentionally checked from
+    /// `ActionRunner.stroke(for:)`, rather than by comparing this table with a hand-maintained
+    /// duplicate list. If a future action forgets its fallback, resolution returns `nil` and the
+    /// action is skipped with a diagnostic instead of silently posting some unrelated real key.
     static let ansiFallback: [Character: UInt16] = [
-        "c": 8, "v": 9, "w": 13, "t": 17, "q": 12,
-        "[": 33, "]": 30, "-": 27, "=": 24
+        "a": UInt16(kVK_ANSI_A), "c": UInt16(kVK_ANSI_C), "d": UInt16(kVK_ANSI_D),
+        "f": UInt16(kVK_ANSI_F), "g": UInt16(kVK_ANSI_G), "h": UInt16(kVK_ANSI_H),
+        "i": UInt16(kVK_ANSI_I), "m": UInt16(kVK_ANSI_M), "n": UInt16(kVK_ANSI_N),
+        "q": UInt16(kVK_ANSI_Q), "t": UInt16(kVK_ANSI_T), "v": UInt16(kVK_ANSI_V),
+        "w": UInt16(kVK_ANSI_W), "x": UInt16(kVK_ANSI_X), "z": UInt16(kVK_ANSI_Z),
+        "1": UInt16(kVK_ANSI_1), "2": UInt16(kVK_ANSI_2), "3": UInt16(kVK_ANSI_3),
+        "4": UInt16(kVK_ANSI_4), "8": UInt16(kVK_ANSI_8),
+        "[": UInt16(kVK_ANSI_LeftBracket), "]": UInt16(kVK_ANSI_RightBracket),
+        "-": UInt16(kVK_ANSI_Minus), "=": UInt16(kVK_ANSI_Equal)
     ]
 
     private static let cache = Locked<[Character: UInt16]?>(nil)
 
-    /// The key code that types `character` right now, or the ANSI position if unknowable.
-    static func keyCode(for character: Character) -> UInt16 {
-        if let mapped = table()[character] { return mapped }
-        return ansiFallback[character] ?? 0
+    /// The key code that types `character` right now, or the ANSI position if known.
+    static func keyCode(for character: Character) -> UInt16? {
+        table()[character] ?? ansiFallback[character]
     }
 
     /// Whether the live layout could be read at all. Surfaced for diagnostics rather than
@@ -66,10 +73,23 @@ enum KeyboardLayout {
     }
 
     private static func table() -> [Character: UInt16] {
+        resolveTable(cache: cache, builder: build)
+    }
+
+    /// Resolve through a supplied cache/build pair so the failure path can be asserted without
+    /// depending on the machine's current TIS state. A failed build is deliberately not stored:
+    /// the next action gets another chance after transient startup/input-source failures.
+    static func resolveTable(
+        cache: Locked<[Character: UInt16]?>,
+        builder: () -> [Character: UInt16]?
+    ) -> [Character: UInt16] {
         if let cached = cache.value { return cached }
-        let built = build() ?? [:]
-        cache.value = built
-        return built
+        guard let built = builder() else { return [:] }
+        return cache.withValue { cached in
+            if let cached { return cached }
+            cached = built
+            return built
+        }
     }
 
     /// Walk the key codes and record what each one types, lowest first.

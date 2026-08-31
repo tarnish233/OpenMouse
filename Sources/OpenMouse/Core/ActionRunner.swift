@@ -17,7 +17,7 @@ struct ActionRunner {
 
     init() {
         source = CGEventSource(stateID: .hidSystemState)
-        source?.userData = ScrollEventPoster.Tag.magic
+        source?.userData = SyntheticEventTag.magic
     }
 
     /// How an action gets performed.
@@ -193,7 +193,14 @@ struct ActionRunner {
         case .handledElsewhere, .paced:
             break
         case let .character(character, flags):
-            keyStroke(KeyboardLayout.keyCode(for: character), flags: flags)
+            guard let keyCode = KeyboardLayout.keyCode(for: character) else {
+                Trace.actionUnavailable(
+                    action: "\(action)",
+                    reason: "当前键盘布局和 ANSI 兜底都无法解析字符 \(character)"
+                )
+                return
+            }
+            keyStroke(keyCode, flags: flags)
         case let .key(code, flags):
             keyStroke(code, flags: flags)
         case let .held(code, flags):
@@ -282,7 +289,7 @@ struct ActionRunner {
         else { return }
         event.type = .flagsChanged
         event.flags = flags
-        event.setIntegerValueField(.eventSourceUserData, value: ScrollEventPoster.Tag.magic)
+        SyntheticEventTag.mark(event)
         event.post(tap: .cghidEventTap)
     }
 
@@ -292,30 +299,36 @@ struct ActionRunner {
         else { return }
         down.flags = flags
         up.flags = []
-        down.setIntegerValueField(.eventSourceUserData, value: ScrollEventPoster.Tag.magic)
-        up.setIntegerValueField(.eventSourceUserData, value: ScrollEventPoster.Tag.magic)
+        SyntheticEventTag.mark(down)
+        SyntheticEventTag.mark(up)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    /// Build one media-key edge without posting it, so the marker invariant is testable.
+    static func auxiliaryEvent(_ key: AuxKey, isDown: Bool) -> CGEvent? {
+        let state = isDown ? 0x0A : 0x0B
+        let data1 = (Int(key.rawValue) << 16) | (state << 8)
+        guard let event = NSEvent.otherEvent(
+            with: .systemDefined,
+            location: .zero,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(state << 8)),
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 8, // NX_SUBTYPE_AUX_CONTROL_BUTTONS
+            data1: data1,
+            data2: -1
+        )?.cgEvent else { return nil }
+        SyntheticEventTag.mark(event)
+        return event
     }
 
     /// Media keys are not virtual key codes; they travel as `NSSystemDefined` events with
     /// the key identifier and press state packed into `data1`.
     private func auxKeyStroke(_ key: AuxKey) {
         for isDown in [true, false] {
-            let state = isDown ? 0x0A : 0x0B
-            let data1 = (Int(key.rawValue) << 16) | (state << 8)
-            guard let event = NSEvent.otherEvent(
-                with: .systemDefined,
-                location: .zero,
-                modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(state << 8)),
-                timestamp: 0,
-                windowNumber: 0,
-                context: nil,
-                subtype: 8, // NX_SUBTYPE_AUX_CONTROL_BUTTONS
-                data1: data1,
-                data2: -1
-            ) else { continue }
-            event.cgEvent?.post(tap: .cghidEventTap)
+            Self.auxiliaryEvent(key, isDown: isDown)?.post(tap: .cghidEventTap)
         }
     }
 

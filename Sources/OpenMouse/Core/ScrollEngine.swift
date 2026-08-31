@@ -12,11 +12,6 @@ import CoreGraphics
 ///   re-enter our own tap on every frame, and — worse — would re-route mid-glide if the
 ///   pointer moved, so inertia would spill into whatever window the cursor wandered over.
 struct ScrollEventPoster {
-    enum Tag {
-        /// Arbitrary but distinctive; "OMSE" as an integer-ish marker.
-        static let magic: Int64 = 0x4F4D_5345
-    }
-
     /// `CGScrollPhase` is not exposed to Swift as an enum, so the raw values live here.
     enum Phase: Int64 {
         case none = 0
@@ -35,7 +30,7 @@ struct ScrollEventPoster {
 
     init() {
         source = CGEventSource(stateID: .hidSystemState)
-        source?.userData = Tag.magic
+        source?.userData = SyntheticEventTag.magic
     }
 
     /// Snapshot the event a notch arrived on, so later frames can be delivered like it.
@@ -59,11 +54,9 @@ struct ScrollEventPoster {
         // pixel-level scrolling; without `IsContinuous` they quantise back to whole lines
         // and the interpolation becomes invisible.
         event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: vertical)
-        event.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: horizontal)
-        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: vertical)
-        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: horizontal)
-        event.setIntegerValueField(.eventSourceUserData, value: Tag.magic)
+        ScrollEventFields.vertical.setPixelDelta(vertical, on: event)
+        ScrollEventFields.horizontal.setPixelDelta(horizontal, on: event)
+        SyntheticEventTag.mark(event)
 
         if phase != .none {
             event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase.rawValue)

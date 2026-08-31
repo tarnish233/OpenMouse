@@ -72,7 +72,7 @@ final class EventRouter {
     func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Anything we posted ourselves must never be reprocessed, or a single notch would
         // feed back into the animator forever.
-        if event.getIntegerValueField(.eventSourceUserData) == ScrollEventPoster.Tag.magic {
+        if SyntheticEventTag.isMarked(event) {
             return Unmanaged.passUnretained(event)
         }
 
@@ -118,8 +118,8 @@ final class EventRouter {
         let wantsSmoothing = settings.affectContinuousDevices && settings.smoothingEnabled
 
         if wantsSmoothing {
-            let dy = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-            let dx = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+            let dy = ScrollEventFields.vertical.read(from: event).fixedPoint
+            let dx = ScrollEventFields.horizontal.read(from: event).fixedPoint
             // A non-finite delta cannot be represented by the easing state. Pass the original
             // event through untouched rather than swallowing it and poisoning the animator.
             guard dy.isFinite, dx.isFinite else { return Unmanaged.passUnretained(event) }
@@ -141,7 +141,7 @@ final class EventRouter {
         }
 
         if wantsReverse {
-            flipAxes(
+            Self.flipAxes(
                 of: event,
                 vertical: settings.reverseVertical,
                 horizontal: settings.reverseHorizontal
@@ -158,13 +158,8 @@ final class EventRouter {
     /// with it. Reading line deltas instead yields ±1 almost always, which makes every notch
     /// travel the same fixed distance no matter how fast you scroll — technically smooth,
     /// but it feels inert.
-    private static func rawDelta(of event: CGEvent, pointField: CGEventField,
-                                 fixedField: CGEventField, lineField: CGEventField) -> Double {
-        let point = event.getDoubleValueField(pointField)
-        if point != 0 { return point }
-        let fixed = event.getDoubleValueField(fixedField)
-        if fixed != 0 { return fixed }
-        return event.getDoubleValueField(lineField)
+    private static func rawDelta(of event: CGEvent, axis: ScrollAxisFields) -> Double {
+        axis.read(from: event).preferred
     }
 
     /// Which of the three delta fields actually supplied the magnitude.
@@ -173,26 +168,16 @@ final class EventRouter {
     /// same ±1 and fast flicks travel no further than slow ones — the pipeline is smooth but
     /// feels inert, and no amount of tuning the easing curve fixes it.
     private static func rawDeltaSource(of event: CGEvent) -> EngineStats.RawDeltaSource {
-        if event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1) != 0
-            || event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2) != 0 { return .point }
-        if event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1) != 0
-            || event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2) != 0 { return .fixed }
+        let vertical = ScrollEventFields.vertical.read(from: event)
+        let horizontal = ScrollEventFields.horizontal.read(from: event)
+        if vertical.point != 0 || horizontal.point != 0 { return .point }
+        if vertical.fixedPoint != 0 || horizontal.fixedPoint != 0 { return .fixed }
         return .line
     }
 
     private func handleWheel(_ event: CGEvent, settings: ScrollSettings) -> Unmanaged<CGEvent>? {
-        let rawY = Self.rawDelta(
-            of: event,
-            pointField: .scrollWheelEventPointDeltaAxis1,
-            fixedField: .scrollWheelEventFixedPtDeltaAxis1,
-            lineField: .scrollWheelEventDeltaAxis1
-        )
-        let rawX = Self.rawDelta(
-            of: event,
-            pointField: .scrollWheelEventPointDeltaAxis2,
-            fixedField: .scrollWheelEventFixedPtDeltaAxis2,
-            lineField: .scrollWheelEventDeltaAxis2
-        )
+        let rawY = Self.rawDelta(of: event, axis: ScrollEventFields.vertical)
+        let rawX = Self.rawDelta(of: event, axis: ScrollEventFields.horizontal)
 
         guard rawY.isFinite, rawX.isFinite else {
             stats.withValue { $0.wheelEventsPassedThrough += 1 }
@@ -208,7 +193,7 @@ final class EventRouter {
             // No smoothing requested: the cheapest correct thing is to flip the existing
             // event in place and let the system deliver it untouched.
             if settings.reverseVertical || settings.reverseHorizontal {
-                flipAxes(
+                Self.flipAxes(
                     of: event,
                     vertical: settings.reverseVertical,
                     horizontal: settings.reverseHorizontal
@@ -238,7 +223,7 @@ final class EventRouter {
                 $0.wheelEventsPassedThrough += 1
             }
             if settings.reverseVertical || settings.reverseHorizontal {
-                flipAxes(
+                Self.flipAxes(
                     of: event,
                     vertical: settings.reverseVertical,
                     horizontal: settings.reverseHorizontal
@@ -277,40 +262,11 @@ final class EventRouter {
         return 1 + (settings.acceleration - 1) * closeness
     }
 
-    /// Negate every delta representation the event carries. Missing any one of the three
-    /// leaves apps reading a different field scrolling the wrong way.
-    ///
-    /// The line and point deltas are integer fields and the fixed-point ones are doubles;
-    /// each is read back with the matching accessor so nothing is silently truncated.
-    private func flipAxes(of event: CGEvent, vertical: Bool, horizontal: Bool) {
-        if vertical {
-            event.setIntegerValueField(
-                .scrollWheelEventDeltaAxis1,
-                value: -event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-            )
-            event.setIntegerValueField(
-                .scrollWheelEventPointDeltaAxis1,
-                value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
-            )
-            event.setDoubleValueField(
-                .scrollWheelEventFixedPtDeltaAxis1,
-                value: -event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-            )
-        }
-        if horizontal {
-            event.setIntegerValueField(
-                .scrollWheelEventDeltaAxis2,
-                value: -event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
-            )
-            event.setIntegerValueField(
-                .scrollWheelEventPointDeltaAxis2,
-                value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
-            )
-            event.setDoubleValueField(
-                .scrollWheelEventFixedPtDeltaAxis2,
-                value: -event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
-            )
-        }
+    /// Negate all three representations using the one shared field/accessor definition.
+    /// DeltaAxis and PointDelta are integers; FixedPtDelta is the fractional 16.16 value.
+    static func flipAxes(of event: CGEvent, vertical: Bool, horizontal: Bool) {
+        if vertical { ScrollEventFields.vertical.reverse(on: event) }
+        if horizontal { ScrollEventFields.horizontal.reverse(on: event) }
     }
 
     // MARK: - Buttons

@@ -38,7 +38,7 @@ struct ShortcutRecorderView: View {
                 return nil
             }
             let modifiers = CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue))
-                .rawValue & EventRouter.modifierMask
+                .rawValue & KeyCombo.modifierMask
             combo = KeyCombo(keyCode: event.keyCode, modifiers: modifiers)
             stop()
             return nil

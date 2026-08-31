@@ -1,3 +1,4 @@
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 
@@ -88,6 +89,8 @@ enum SelfCheck {
         group("键盘布局") {
             resolvesCharactersOnLiveLayout()
             hasFallbackForEveryCharacter()
+            failedLayoutBuildIsRetried()
+            shortcutLabelsFollowLiveLayout()
         }
         group("桌面切换节流") {
             queuesRapidSwitches()
@@ -97,6 +100,8 @@ enum SelfCheck {
         group("事件投递") {
             tapsWhereTargetIsAnnotated()
             refusesUndeliverableTarget()
+            reversesAllScrollFields()
+            auxiliaryEventsCarrySyntheticTag()
         }
         group("系统快捷键") {
             windowManagementStrokesCarryFn()
@@ -990,6 +995,50 @@ enum SelfCheck {
         expect(target?.pid == getpid(), "投递目标带上事件标注的目标进程 pid")
     }
 
+    /// The review called PointDelta fractional, but Apple documents it as an integer and a
+    /// real CGEvent quantises 0.5 to zero. FixedPtDelta is the representation that must retain
+    /// fractions. This pins the actual field contract while still covering all three axes.
+    private static func reversesAllScrollFields() {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 1, wheel2: -1, wheel3: 0
+        ) else {
+            expect(false, "能构造滚轮事件用于方向翻转检查")
+            return
+        }
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: 2)
+        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: 5)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: 0.25)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -3)
+        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: -7)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -0.75)
+
+        EventRouter.flipAxes(of: event, vertical: true, horizontal: true)
+        let vertical = ScrollEventFields.vertical.read(from: event)
+        let horizontal = ScrollEventFields.horizontal.read(from: event)
+        expect(
+            vertical.line == -2 && vertical.point == -5 && vertical.fixedPoint == -0.25
+                && horizontal.line == 3 && horizontal.point == 7 && horizontal.fixedPoint == 0.75,
+            "方向翻转按真实字段类型同时处理 DeltaAxis / PointDelta / FixedPtDelta"
+        )
+
+        ScrollEventFields.vertical.setPixelDelta(0.5, on: event)
+        let synthetic = ScrollEventFields.vertical.read(from: event)
+        expect(
+            synthetic.point == 0 && synthetic.fixedPoint == 0.5,
+            "合成亚像素滚动写入整数 PointDelta，并由 FixedPtDelta 保留小数"
+        )
+    }
+
+    private static func auxiliaryEventsCarrySyntheticTag() {
+        let down = ActionRunner.auxiliaryEvent(.mute, isDown: true)
+        let up = ActionRunner.auxiliaryEvent(.mute, isDown: false)
+        expect(
+            down.map(SyntheticEventTag.isMarked) == true
+                && up.map(SyntheticEventTag.isMarked) == true,
+            "媒体键的按下和松开都带合成事件魔数"
+        )
+    }
+
     /// The window-management defaults, pinned against what macOS records in
     /// `com.apple.symbolichotkeys` on an untouched system.
     ///
@@ -1070,6 +1119,14 @@ enum SelfCheck {
                 && ActionRunner.functionKey(for: .controlCenter) == .controlCenter,
             "启动台与控制中心走功能键路径，不走符号热键"
         )
+        expect(
+            KeyCombo.modifierMask & CGEventFlags.maskSecondaryFn.rawValue != 0,
+            "快捷键录制保留 Fn 位，窗口管理组合不会被静默改坏"
+        )
+        expect(
+            KeyCodeNames.modifierGlyphs(CGEventFlags.maskSecondaryFn.rawValue).contains("fn"),
+            "录入的 Fn 修饰键在快捷键标签中可见"
+        )
         // Old configs may still hold the removed `launchpad` action; it must decode to
         // passthrough rather than throwing away the whole binding list.
         let legacy = Data(#"{"button":3,"action":{"launchpad":{}}}"#.utf8)
@@ -1124,15 +1181,28 @@ enum SelfCheck {
         }
     }
 
+    private static func charactersUsedByActions() -> [Character] {
+        Array(Set(ActionKind.allCases.compactMap { kind in
+            let action = kind.makeAction(preserving: .passthrough)
+            guard case let .character(character, _) = ActionRunner.stroke(for: action) else {
+                return nil
+            }
+            return character
+        })).sorted { String($0) < String($1) }
+    }
+
     /// A key code is a physical position, not a letter. The check that matters is the round
     /// trip: whatever code we resolve for "w" must be a position that actually types "w" on
     /// the layout in use — otherwise "close tab" sends ⌘Z on French or ⌘, on Dvorak.
     private static func resolvesCharactersOnLiveLayout() {
-        let needed: [Character] = ["c", "v", "w", "t", "q", "[", "]", "-", "="]
+        let needed = charactersUsedByActions()
         var roundTripped = 0
         var mismatched: [String] = []
         for character in needed {
-            let code = KeyboardLayout.keyCode(for: character)
+            guard let code = KeyboardLayout.keyCode(for: character) else {
+                mismatched.append("\(character)→nil")
+                continue
+            }
             guard KeyboardLayout.isResolvedFromLiveLayout(character) else { continue }
             if KeyboardLayout.character(for: code) == character {
                 roundTripped += 1
@@ -1140,24 +1210,59 @@ enum SelfCheck {
                 mismatched.append("\(character)→\(code)")
             }
         }
-        expect(mismatched.isEmpty, "从当前布局解析出的键码能反向还原为同一字符" + (mismatched.isEmpty ? "（\(roundTripped)/\(needed.count) 项来自实时布局）" : "，不符: \(mismatched.joined(separator: " "))"))
         expect(
-            needed.allSatisfy { KeyboardLayout.keyCode(for: $0) != 0 },
-            "每个需要的字符都能解析出键码，不会发出键码 0"
+            mismatched.isEmpty,
+            "从当前布局解析出的键码能反向还原为同一字符"
+                + (mismatched.isEmpty
+                    ? "（\(roundTripped)/\(needed.count) 项来自实时布局）"
+                    : "，不符: \(mismatched.joined(separator: " "))")
         )
     }
 
-    /// The fallback is for layouts where a character needs a modifier to type, so it has no
-    /// unmodified position at all. Missing an entry there means posting key code 0.
+    /// Derive the required set from the production action table. A hand-written list copied
+    /// from the fallback table would be a tautology and cannot catch a newly added shortcut.
     private static func hasFallbackForEveryCharacter() {
-        let needed: [Character] = ["c", "v", "w", "t", "q", "[", "]", "-", "="]
+        let needed = charactersUsedByActions()
+        let unresolved = needed.filter { KeyboardLayout.keyCode(for: $0) == nil }
+        let missingFallbacks = needed.filter { KeyboardLayout.ansiFallback[$0] == nil }
         expect(
-            needed.allSatisfy { KeyboardLayout.ansiFallback[$0] != nil },
-            "每个字符都有 ANSI 兜底值（读不到实时布局时使用）"
+            unresolved.isEmpty && missingFallbacks.isEmpty,
+            unresolved.isEmpty && missingFallbacks.isEmpty
+                ? "全部 \(needed.count) 个动作字符都能解析，且有 ANSI 兜底"
+                : "无法解析: \(unresolved)，缺少兜底: \(missingFallbacks)"
         )
         expect(
-            KeyboardLayout.ansiFallback["c"] == 8 && KeyboardLayout.ansiFallback["w"] == 13,
-            "ANSI 兜底值就是标准 kVK_ANSI_* 位置"
+            KeyboardLayout.ansiFallback["c"] == UInt16(kVK_ANSI_C)
+                && KeyboardLayout.ansiFallback["1"] == UInt16(kVK_ANSI_1),
+            "ANSI 兜底使用系统的 kVK_ANSI_* 物理位置常量"
+        )
+        expect(
+            KeyboardLayout.keyCode(for: "🙂") == nil,
+            "无法解析的字符返回 nil，不会退化成某个真实按键"
+        )
+    }
+
+    private static func failedLayoutBuildIsRetried() {
+        let cache = Locked<[Character: UInt16]?>(nil)
+        var attempts = 0
+        let first = KeyboardLayout.resolveTable(cache: cache) {
+            attempts += 1
+            return nil
+        }
+        let second = KeyboardLayout.resolveTable(cache: cache) {
+            attempts += 1
+            return ["x": UInt16(kVK_ANSI_X)]
+        }
+        expect(
+            first.isEmpty && second["x"] == UInt16(kVK_ANSI_X) && attempts == 2,
+            "键盘布局读取失败不会缓存为空成功结果，下一次解析会重试"
+        )
+    }
+
+    private static func shortcutLabelsFollowLiveLayout() {
+        expect(
+            KeyCodeNames.name(for: UInt16(kVK_ANSI_A), resolveCharacter: { _ in "q" }) == "Q",
+            "可打印键的标签来自当前布局，不来自 ANSI 键码硬编码表"
         )
     }
 
@@ -1188,16 +1293,27 @@ enum SelfCheck {
         for kind in ActionKind.allCases {
             let action = kind.makeAction(preserving: .passthrough)
             let stroke = ActionRunner.stroke(for: action)
+            let signature: String
             switch stroke {
-            case .character, .key, .held, .systemHotkey, .functionKey, .aux:
-                let signature = "\(stroke)"
-                if let existing = seen[signature] {
-                    duplicates.append("\(existing) / \(kind.title)")
-                } else {
-                    seen[signature] = kind.title
+            case let .character(character, flags):
+                guard let code = KeyboardLayout.keyCode(for: character) else {
+                    duplicates.append("\(kind.title) / 字符 \(character) 无法解析")
+                    continue
                 }
+                signature = "key:\(code):\(flags.rawValue)"
+            case let .key(code, flags):
+                signature = "key:\(code):\(flags.rawValue)"
+            case let .held(code, flags):
+                signature = "held:\(code):\(flags.rawValue)"
+            case .systemHotkey, .functionKey, .aux:
+                signature = "\(stroke)"
             default:
                 continue
+            }
+            if let existing = seen[signature] {
+                duplicates.append("\(existing) / \(kind.title)")
+            } else {
+                seen[signature] = kind.title
             }
         }
         expect(

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// A dynamic key lets the decoder inspect an enum discriminator without rejecting names
@@ -132,6 +133,13 @@ struct ScrollSettings: Codable, Equatable, Sendable {
 
 /// A recorded keyboard shortcut: virtual key code plus modifier mask.
 struct KeyCombo: Codable, Equatable, Hashable, Sendable {
+    /// Keyboard modifiers that can be recorded and replayed. Fn is essential for macOS window
+    /// management shortcuts; dropping it produces a plausible-looking shortcut that the system
+    /// silently ignores.
+    static let modifierMask = CGEventFlags([
+        .maskCommand, .maskShift, .maskAlternate, .maskControl, .maskSecondaryFn
+    ]).rawValue
+
     var keyCode: UInt16
     /// Raw value of `CGEventFlags` restricted to the modifier bits.
     var modifiers: UInt64

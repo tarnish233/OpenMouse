@@ -13,13 +13,15 @@
 |---|---|---|
 | 1 | F1、`cancel()` 漏重置运行态、F5、C3 | **已修复并核实**（自检 136 → 143 项） |
 | 2 | F3 | **已修复并核实**（自检 143 → 145 项） |
-| 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | 未开始 |
+| 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | **已复核并完成**（F4 核心结论驳回；自检 145 → 152 项） |
 | 4 | F7、F9、F10、F11 | 未开始 |
 | 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | 未开始 |
 
 第 1 批的核实方式：读代码确认锁序无反转（animator 锁 → ticker 锁，三个调用点方向一致）、真机 26 段滑行放大稳定在 9.6x 且无投递失败、空闲 CPU 0.0%。遗留的三点小问题记在 §6 末尾。
 
 第 2 批的降级策略：未知或损坏的 `MouseAction` 变为 `.passthrough`，只让该条绑定在 `normalize()` 时被移除；`buttons` 数组逐元素容错，任何单行损坏都不会清空其余映射。`KeyCombo` 逐字段读取，未知字段忽略、缺失字段回落默认值。
+
+第 3 批复核发现 F4 的核心判定错误：Apple 将 `PointDelta` 定义为整数，实际构造的 `CGEvent` 也会把写入的 `0.5` 量化为 `0`；Mos 使用 double 存取器只是发生隐式转换，不能证明字段能保存小数。该条按真实字段类型收口并覆盖三字段翻转，其余 F2、断言和三处漂移均已修复。
 
 `CLAUDE.md` 里 §4 指出的两句假话已经改掉了（约束 11 的覆盖范围、测试一节声称的断言覆盖）。
 
@@ -40,7 +42,7 @@
 | F1 | `Core/ScrollEngine.swift:197` | `running` 与帧源生命周期不在同一临界区，竞态后闩死 | 已确认 |
 | F5 | `Core/ScrollAxis.swift:39` | 无 `isFinite` 检查，一个 NaN 让动画永不终止 | 待确认 |
 | **P1 —— 已经破掉的硬性约束** | | | |
-| F4 | `Core/EventRouter.swift:277` | 约束 8：`PointDelta` 用了整数存取器，亚像素增量被抹成 0 | 已确认 |
+| F4 | `Core/EventRouter.swift:277` | 原报告把 `PointDelta` 类型判反；真实问题是字段语义散落且无断言 | **复核后驳回原结论，已收口** |
 | F2 | `Core/KeyboardLayout.swift:31` | 约束 5：键码兜底返回 `0`（一个真键），发出另一个快捷键 | 已确认 |
 | F3 | `Model/Settings.swift:118` | 约束 11：`KeyCombo` / `MouseAction` 没有手写 `init(from:)`，会静默清空用户映射 | 已确认 |
 | **P2 —— 功能性缺陷** | | | |
@@ -142,47 +144,26 @@ func cancel() {
 
 三条都以同一种方式破的：**约束靠每个调用点自己遵守，而不是收在一个必经的收口处**。所以修法不只是改这三处，还要考虑能不能让下一次漂移编译不过或被断言抓住。
 
-### F4 —— 约束 8：`PointDelta` 用了整数存取器（已确认）
+### F4 —— 原报告把 `PointDelta` 类型判反（复核后驳回核心结论）
 
-**位置**：`Core/EventRouter.swift:277-280`（垂直）、`:291-294`（水平）
+**原位置**：`Core/EventRouter.swift` 的 `flipAxes`、`rawDelta`，以及 `Core/ScrollEngine.swift` 的合成写入。
 
-**代码事实**——我把两边并排读过：
+复核时同时检查了三类证据：
 
-```swift
-// open_mouse, EventRouter.swift:277
-event.setIntegerValueField(
-    .scrollWheelEventPointDeltaAxis1,
-    value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
-)
-```
+1. Apple 的 `CGEventField` 文档把 `scrollWheelEventPointDeltaAxis1/2` 明确列为整数像素字段；
+2. 在本机真实构造 `CGEvent` 后用 double setter 写入 `PointDelta = 0.5`，读回为 `0`，写入 `-1.25` 读回为 `-1`；
+3. Mos 虽然对 `PointDelta` 使用 double accessor，但这只触发 Core Graphics 的数值转换，不能证明底层字段保存小数。
 
-```swift
-// ~/workspace/Mos/Mos/ScrollCore/ScrollEvent.swift:124 —— MEMORY.md 指定的事实来源
-scrollEvent.event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -scrollEvent.Y.scrollFix)
-scrollEvent.event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: -scrollEvent.Y.scrollPt)
-scrollEvent.event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -scrollEvent.Y.scrollFixPt)
-```
+因此，原报告提出的「`PointDelta = 0.5` 翻转后应为 `-0.5`」断言本身无法成立，原注释“line 和 point 为整数、fixed-point 为浮点访问”才是正确的。
 
-Mos 对 `PointDelta` 用 `setDoubleValueField`，只对 `DeltaAxis` 用整数存取器。
+不过报告指出的**结构性风险成立**：三个字段及其存取器散落在 `flipAxes`、`rawDelta` 和 `ScrollEventPoster`，同一语义由多个调用点分别维护。第 3 批已把它们收口到 `ScrollEventFields`：
 
-**这个项目自己的其他地方也和 Mos 一致**——`EventRouter.swift:160`（`rawDelta`）和 `ScrollEngine.swift:62` 都用浮点存取器读 `PointDelta`。**只有 `flipAxes` 一处不一致**，而它的注释（`:269-270`）还明确写着与参考实现相反的断言：
+- `DeltaAxis`：整数存取器；
+- `PointDelta`：整数存取器；
+- `FixedPtDelta`：double 存取器，保留 16.16 小数；
+- 翻转、原始增量读取和合成写入都经过同一描述。
 
-```
-/// The line and point deltas are integer fields and the fixed-point ones are doubles;
-/// each is read back with the matching accessor so nothing is silently truncated.
-```
-
-这句话是错的，而且它正是让这个 bug 看起来「已经想过了」的原因。修的时候连注释一起改。
-
-**失效场景**：高分辨率 / 自由滚轮，或走「连续设备不平滑但反向」那条路（`:141`）的 Magic Mouse，增量为 0.5 这类亚像素值时：`getIntegerValueField` 返回 0，取反得 `-0`，像素增量被**抹掉**而不是取反。应用读 `NSEvent.scrollingDeltaY` 得到 0 —— 反向看起来像「滚不动了」，而不是「反了」。
-
-**修复要建立的性质**：
-
-> 每个增量字段都用与其真实类型匹配的存取器读写，且这一点在项目内只有一个地方定义。
-
-考虑把「三个字段 + 各自的存取器」抽成一处（比如一个 `ScrollField` 描述表），让 `flipAxes`、`rawDelta`、`ScrollEventPoster` 都从它取，这样存取器不匹配就没有第二个地方可以漂移。
-
-**应补断言**：构造一个 `PointDelta = 0.5` 的 CGEvent，翻转后断言读回 `-0.5`。`flipAxes` 目前是 `private`，需要放开可见性——这是可接受的代价，约束 8 现在一条断言都没有。
+**已补断言**：构造同时带 line、整数 PointDelta 和小数 FixedPtDelta 的双轴事件，翻转后断言三个表示都按真实字段类型完整取反。
 
 ### F2 —— 约束 5：键码兜底返回 `0`，那是一个真键（已确认）
 
@@ -494,20 +475,20 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 | 2 | 投不出去就不要吞 | 有 |
 | 3 | 窗口管理快捷键带 `maskSecondaryFn` | 有 |
 | 4 | 读 `com.apple.symbolichotkeys` | 有 |
-| 5 | 不硬编码字符键码 | 有，但**同义反复**（见 4.2） |
-| 6 | 合成事件打魔数 | **无** |
+| 5 | 不硬编码字符键码 | 有（第 3 批改为从生产动作表反向枚举并在解析后查重） |
+| 6 | 合成事件打魔数 | 有（第 3 批覆盖媒体键，并收口到 `SyntheticEventTag`） |
 | 7 | 合成滚动设 `IsContinuous = 1` | **无** |
-| 8 | 反向翻三个字段 | **无** |
+| 8 | 反向翻三个字段 | 有（第 3 批按 Apple 的真实字段类型覆盖） |
 | 9 | 帧源不用 `NSScreen.main` | **无** |
 | 10 | 处理 `tapDisabledByTimeout` | **无** |
-| 11 | 手写 `init(from:)` | 部分（只覆盖 `Preferences` 层） |
+| 11 | 手写 `init(from:)` | 有（第 2 批覆盖子结构和逐元素容错） |
 | 12 | 动作不在 tap 回调里同步执行 | **无** |
 | 13 | 不在 tap 回调里查最前应用 | 有 |
 | 14 | 不用键盘 tap 探测键码 | **无**（这条本质上无法断言，是流程约束——文档应当把它标出来） |
 
-七条零覆盖。约束 8 零覆盖 → F4；约束 5 只有同义反复的覆盖 → F2；约束 11 部分覆盖 → F3。**对应关系非常直接。**
+审查当时共有七条零覆盖；第 2、3 批已补上约束 5 / 6 / 8 / 11。F2 和 F3 的覆盖缺口判断成立；F4 则在复核时发现报告对字段类型的前提判断错误，详见上面的修正记录。
 
-### 4.2 两条现有断言是同义反复的
+### 4.2 两条现有断言是同义反复的（第 3 批已修正）
 
 比「没有断言」更糟——它们让人以为已经被覆盖了。
 
@@ -519,7 +500,9 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 
 > 应改成：在解析出键码**之后**签名，即把 `.character` 先过 `KeyboardLayout.keyCode(for:)` 再比较。
 
-### 4.3 另外三处调用点已经漂移，目前只是潜伏
+第 3 批已经按上述方式改正：所需字符集从 `ActionRunner.stroke(for:)` 反向枚举，共 24 个；重复签名在布局解析之后生成。
+
+### 4.3 另外三处调用点已经漂移（第 3 批已修正）
 
 和 F2 / F4 同一种成因（每个调用点各自遵守约束），但当前还没有造成可见后果。**修 F2 / F4 时一起处理**，否则它们就是下一批 F。
 
@@ -529,7 +512,7 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 | `UI/ShortcutRecorderView.swift:40` | 3（`maskSecondaryFn`） | 录入时把 `maskSecondaryFn` 掩掉了 | 录入的 Fn 组合会被 WindowServer 静默忽略——**这条其实已经在造成后果**，只是没人报 |
 | `UI/KeyCodeNames.swift:7` | 5（不硬编码键码） | 标签路径里硬编码了一张 ANSI 键码→字符表 | 只影响界面显示的文字，不影响投出去的键。但在非 ANSI 布局上标签是错的 |
 
-正确的 `KeyboardLayout.character(for:)` 存在，但目前**只有 `SelfCheck` 在调用它**。
+第 3 批已统一处理：媒体键事件经过 `SyntheticEventTag`，快捷键录制使用包含 Fn 的 `KeyCombo.modifierMask`，可打印键标签改由 `KeyboardLayout.character(for:)` 解析；三处均新增断言。
 
 ---
 
