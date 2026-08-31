@@ -14,8 +14,11 @@ import CoreGraphics
 /// that class of bug from "ships and nobody notices" into "does not compile".
 struct ActionRunner {
     private let source: CGEventSource?
+    /// Self-check seam for proving an unset custom shortcut never reaches the posting edge.
+    private let customKeyStroke: ((UInt16, CGEventFlags) -> Void)?
 
-    init() {
+    init(customKeyStroke: ((UInt16, CGEventFlags) -> Void)? = nil) {
+        self.customKeyStroke = customKeyStroke
         source = CGEventSource(stateID: .hidSystemState)
         source?.userData = SyntheticEventTag.magic
     }
@@ -212,7 +215,16 @@ struct ActionRunner {
         case let .aux(key):
             auxKeyStroke(key)
         case let .custom(combo):
-            keyStroke(combo.keyCode, flags: CGEventFlags(rawValue: combo.modifiers))
+            guard combo.isSet else {
+                Trace.actionUnavailable(action: "\(action)", reason: "自定义快捷键尚未录入")
+                return
+            }
+            let flags = CGEventFlags(rawValue: combo.modifiers)
+            if let customKeyStroke {
+                customKeyStroke(combo.keyCode, flags)
+            } else {
+                keyStroke(combo.keyCode, flags: flags)
+            }
         case let .launch(path):
             openApp(at: path)
         }

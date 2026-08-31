@@ -7,6 +7,10 @@ import SwiftUI
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private static var shared: SettingsWindowController?
+    private lazy var activationLease = AppActivationLease(
+        onEnter: { AppActivationPolicy.enter() },
+        onLeave: { AppActivationPolicy.leave() }
+    )
 
     static func show(tab: SettingsTab? = nil) {
         if let tab {
@@ -50,7 +54,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     override func showWindow(_ sender: Any?) {
         // Promote the activation policy *before* ordering the window front: a `.accessory`
         // app cannot own the active window, so activating first would be a no-op.
-        AppActivationPolicy.enter()
+        activationLease.enter()
         super.showWindow(sender)
         guard let window else { return }
         window.makeKeyAndOrderFront(nil)
@@ -68,7 +72,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         MouseEngine.shared.endButtonCapture()
         SettingsStore.shared.saveNow()
-        AppActivationPolicy.leave()
+        activationLease.leave()
         Self.shared = nil
     }
 }

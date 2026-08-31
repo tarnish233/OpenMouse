@@ -276,7 +276,7 @@ private struct ActionRow: View {
     private var comboBinding: Binding<KeyCombo?> {
         Binding(
             get: {
-                if case let .keyStroke(combo) = action { return combo }
+                if case let .keyStroke(combo) = action { return combo.valueIfSet }
                 return nil
             },
             set: { newValue in

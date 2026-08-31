@@ -24,3 +24,30 @@ enum AppActivationPolicy {
         }
     }
 }
+
+
+/// One visible window owns one activation-policy reference. Repeated attempts to show the
+/// same window are idempotent, while distinct windows can still hold independent leases.
+@MainActor
+final class AppActivationLease {
+    private let onEnter: () -> Void
+    private let onLeave: () -> Void
+    private(set) var isHeld = false
+
+    init(onEnter: @escaping () -> Void, onLeave: @escaping () -> Void) {
+        self.onEnter = onEnter
+        self.onLeave = onLeave
+    }
+
+    func enter() {
+        guard !isHeld else { return }
+        isHeld = true
+        onEnter()
+    }
+
+    func leave() {
+        guard isHeld else { return }
+        isHeld = false
+        onLeave()
+    }
+}

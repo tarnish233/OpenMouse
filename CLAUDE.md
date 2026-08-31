@@ -15,7 +15,7 @@ make app      # swift build -c release + 组装 .app + 签名 → build/Open Mou
 make run      # 上面这些，然后 pkill 旧进程并启动
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
 make debug    # debug 配置的 .app
-make test     # 内置自检（183 项，必须全过）
+make test     # 内置自检（195 项，必须全过）
 make dist     # ditto 打包成 build/OpenMouse-<版本>.zip 并打印 sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -34,7 +34,7 @@ make test                                        # 等价于 swift run -c debug 
 
 返回码即结果，失败会打出哪一条断言挂了。
 
-**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 16 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
+**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 17 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
 
 ### 调试
 
@@ -85,7 +85,7 @@ OpenMouse --check-update owner/repo   # 走真实网络检查更新并退出
 - `App/` —— AppKit 生命周期、菜单栏、设置窗口。
 - `Support/` —— `SelfCheck.swift`（断言）、`Trace.swift`（os.Logger）、`Strings.swift`（全部文案）、`Locked.swift`。
 
-**新增一个动作要同时改三处**：`MouseAction`（`Model/Settings.swift`）、`ActionKind`（标题 + 分组 + `init(_:)` + `makeAction(preserving:)`）、`ActionRunner.stroke(for:)`。漏掉最后一处编译不过（见下），漏掉分组会被自检抓住。
+**新增一个动作要同时改三处**：`MouseAction`（`Model/Settings.swift`）、`ActionKind`（标题 + 分组 + `init(_:)` + `makeAction(preserving:)`）、`ActionRunner.stroke(for:)`。漏掉最后一处编译不过（见下），漏掉分组会被自检抓住。自定义快捷键的空状态只能用 `KeyCombo.unset`（`UInt16.max`），键码 0 是真实按键；投递边界必须检查 `isSet`。
 
 ## 结构
 

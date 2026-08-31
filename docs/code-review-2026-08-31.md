@@ -15,7 +15,7 @@
 | 2 | F3 | **已修复并核实**（自检 143 → 145 项） |
 | 3 | F4、F2、§4.3 三处潜伏漂移、§4.2 两条同义反复的断言 | **已复核并完成**（F4 核心结论驳回；自检 145 → 152 项） |
 | 4 | F7、F9、F10、F11 | **已修复并核实**（自检 152 → 183 项） |
-| 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | 未开始 |
+| 5 | F8、F6、F12、F14、F13、F15、C1、C2、C4 | **进行中**（F8、C1、C2、C4 已修复；自检 183 → 195 项） |
 
 第 1 批的核实方式：读代码确认锁序无反转（animator 锁 → ticker 锁，三个调用点方向一致）、真机 26 段滑行放大稳定在 9.6x 且无投递失败、空闲 CPU 0.0%。遗留的三点小问题记在 §6 末尾。
 
@@ -24,6 +24,8 @@
 第 3 批复核发现 F4 的核心判定错误：Apple 将 `PointDelta` 定义为整数，实际构造的 `CGEvent` 也会把写入的 `0.5` 量化为 `0`；Mos 使用 double 存取器只是发生隐式转换，不能证明字段能保存小数。该条按真实字段类型收口并覆盖三字段翻转，其余 F2、断言和三处漂移均已修复。
 
 第 4 批把「按下时的所有权」收成 `buttonClaims`，mouse-up 不再重新解析可变配置；`MouseEngine` 的 off / needsPermission / failed / stop 统一走 teardown，同时停止两条 tap、滚动、按键会话和权限轮询；两种系统禁用原因都经过同一恢复钩子；连续设备平滑、透传和无目标回退共用一份反向策略。release 构建通过，`make test` 183/183。
+
+第 5 批第一子批完成 F8、C1、C2、C4：未录入快捷键改用 `KeyCombo.unset` 且投递前拒绝；设置窗口通过幂等 activation lease 持有引用；版本读取失败显示「未知」；用户可写系统快捷键数值使用 exact narrowing。release 构建通过，`make test` 195/195。
 
 `CLAUDE.md` 里 §4 指出的两句假话已经改掉了（约束 11 的覆盖范围、测试一节声称的断言覆盖）。
 
@@ -53,7 +55,7 @@
 | F9 | `Core/MouseEngine.swift:109` | 未授权分支不拆 motion tap，`isRunning` 变陈旧真，重新授权后手势永久失效 | **已修复（第 4 批）** |
 | F10 | `Core/MouseEngine.swift:59` | 手势拆除钩子挂在了不带按键事件的那个 tap 上 | **已修复（第 4 批）** |
 | F11 | `Core/EventRouter.swift:129` | 平滑分支无视 `reverseContinuousDevices`，触控板被违愿反向 | **已修复（第 4 批）** |
-| F8 | `Model/ActionKind.swift:299` | 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母 | 已确认 |
+| F8 | `Model/ActionKind.swift:299` | 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母 | **已修复（第 5 批）** |
 | F6 | `Core/MouseGestureRecognizer.swift:106` | 10–40px 与所有斜划既不触发方向也不算单击，按键表现为坏了 | 已确认 |
 | F12 | `Model/Settings.swift:381` | 应用规则按最前应用取，事件按 `postToPid` 投——两者不同一时规则用错进程 | 已确认 |
 | F14 | `Core/UpdateCoordinator.swift:29` | 「每 24 小时」实际是「每次启动一次」；`跳过此版本` 写了个没人读的字段 | 已确认 |
@@ -327,7 +329,7 @@ let built = build() ?? [:]
 
 **第 4 批修复结果**：`ContinuousScrollPolicy` 一次产出平滑与两轴反向决定；平滑投递、非平滑透传、无目标回退都消费这份策略。自检覆盖闸门开关、平滑开关和无目标回退的方向。
 
-### F8 —— 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母（已确认）
+### F8 —— 自定义快捷键默认 `keyCode: 0`，未录入就会打出一个字母（已确认；第 5 批已修复）
 
 **位置**：`Model/ActionKind.swift:299`（`makeAction(preserving:)`）、`Core/ActionRunner.swift:208`（`.custom`）、`:289`（`keyStroke`）
 
@@ -350,6 +352,8 @@ let built = build() ?? [:]
 用 `65535` 复用现有哨兵是最省的做法，投递前 guard 掉。
 
 **应补断言**：断言未录入的 `.keyStroke` 不产生任何按键投递。
+
+**第 5 批修复结果**：新增 `KeyCombo.unset` / `isSet`，动作选择器不再用真实键码 0 当空值；录制控件明确显示「未设置」，`ActionRunner` 在投递边界拒绝 unset。自检用注入的按键投递探针证明 unset 不产生事件，同时证明真实键码 0 仍可正常投递。
 
 ### F6 —— 手势的死区与斜划（已确认）
 
@@ -529,19 +533,23 @@ grep -E '"(Apple Development|Developer ID Application)' | head -1
 
 这些是被条数上限砍掉的。**C1–C4 我事后单独核实过，是真的**；C5–C9 只有扫描阶段的结论，动手前请自行确认。
 
-### C1 —— `AppActivationPolicy` 引用计数泄漏（已核实）
+### C1 —— `AppActivationPolicy` 引用计数泄漏（已核实；第 5 批已修复）
 
 `App/SettingsWindowController.swift:53` 的 `showWindow` **无条件**调 `AppActivationPolicy.enter()`（`count += 1`），而 `windowWillClose`（`:71`）只调一次 `leave()`。窗口已经开着时再点一次菜单栏「设置…」→ `count` 变 2，关闭只减到 1，`guard count == 0` 不成立 → **`.accessory` 永远不恢复**。一个菜单栏工具从此永久占着 Dock 图标，直到重启。
 
 修复性质：`enter()` 只在实际发生 `.accessory → .regular` 转换时计数，或者干脆改成「窗口是否可见」的幂等查询而不是引用计数。
 
-### C2 —— `SettingsView.swift:43` 硬编码版本号兜底（已核实）
+**第 5 批修复结果**：`SettingsWindowController` 持有一个 `AppActivationLease`；同一窗口重复 show 只 acquire 一次，close 重复通知也只 release 一次，同时保留未来多窗口各自持有引用的能力。自检驱动双 enter / 双 leave，断言底层各只调用一次。
+
+### C2 —— `SettingsView.swift:43` 硬编码版本号兜底（已核实；第 5 批已修复）
 
 ```swift
 static let short: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
 ```
 
 CLAUDE.md 写明版本号的**唯一来源**是 `Info.plist`。这个兜底违背了它：读不到时应当显示「未知」而不是撒一个会随时间变得越来越假的谎（它会在 0.2.0 上显示 0.1.0）。
+
+**第 5 批修复结果**：`AppVersion.value` 对缺失/空值返回「未知」，不再内置任何版本号；自检同时覆盖缺失和真实 Info.plist 值。
 
 ### C3 —— 跨线程变量没走 `Locked` 约定（已核实）
 
@@ -551,13 +559,15 @@ CLAUDE.md 写明版本号的**唯一来源**是 `Info.plist`。这个兜底违�
 
 CLAUDE.md 的约定是「跨线程共享状态统一走 `Locked`」。这两处是例外，而 F1 正好发生在这一带——修 F1 时会同时碰到它们。
 
-### C4 —— `SystemHotkeys.swift:143` 无检查窄化转换（已核实）
+### C4 —— `SystemHotkeys.swift:143` 无检查窄化转换（已核实；第 5 批已修复）
 
 ```swift
 return .stroke(Stroke(keyCode: UInt16(keyCode), flags: CGEventFlags(rawValue: UInt64(modifiers))))
 ```
 
 `keyCode` / `modifiers` 来自 `com.apple.symbolichotkeys` —— 一个**用户可写**的 plist。`65535` 哨兵被 `:141` 的 guard 挡住了，但越界值（负数、大于 65535）会让 `UInt16(...)` **直接 trap**，进程崩溃。用 `UInt16(exactly:)` 并在失败时降级成 `.disabledBySystem`。
+
+**第 5 批修复结果**：plist entry 解析收口到 `resolution(from:)`，键码和修饰位分别用 `UInt16(exactly:)` / `UInt64(exactly:)`；负数、超大值和 `UInt16.max` 都安全降级。自检覆盖三种非法数值和一条有效值。
 
 ### C5–C9 —— 仅扫描阶段结论，动手前请确认
 

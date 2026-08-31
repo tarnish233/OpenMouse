@@ -85,7 +85,7 @@ enum Strings {
         default: return "按键 \(number + 1)"
         }
     }
-    static let buttonRecordShortcut = "点击录制快捷键"
+    static let buttonRecordShortcut = "未设置（点击录制）"
     static let buttonRecording = "请按下快捷键…"
     static let buttonChooseApp = "选择应用…"
 

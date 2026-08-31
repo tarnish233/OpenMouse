@@ -133,6 +133,12 @@ struct ScrollSettings: Codable, Equatable, Sendable {
 
 /// A recorded keyboard shortcut: virtual key code plus modifier mask.
 struct KeyCombo: Codable, Equatable, Hashable, Sendable {
+    /// macOS uses UInt16.max as the "no key assigned" placeholder in symbolic hotkeys. Keep
+    /// the same explicit state for a custom shortcut that the user selected but has not yet
+    /// recorded; key code 0 is a real key and must never be used as an absence sentinel.
+    static let unsetKeyCode = UInt16.max
+    static let unset = KeyCombo(keyCode: unsetKeyCode, modifiers: 0)
+
     /// Keyboard modifiers that can be recorded and replayed. Fn is essential for macOS window
     /// management shortcuts; dropping it produces a plausible-looking shortcut that the system
     /// silently ignores.
@@ -149,15 +155,18 @@ struct KeyCombo: Codable, Equatable, Hashable, Sendable {
         self.modifiers = modifiers
     }
 
+    var isSet: Bool { keyCode != Self.unsetKeyCode }
+    var valueIfSet: KeyCombo? { isSet ? self : nil }
+
     /// Decode each field independently so adding a field to a future shortcut does not turn
     /// every shortcut written by an older build into `.passthrough`.
     init(from decoder: Decoder) throws {
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
-            self.init(keyCode: 0, modifiers: 0)
+            self = .unset
             return
         }
         self.init(
-            keyCode: (try? c.decode(UInt16.self, forKey: .keyCode)) ?? 0,
+            keyCode: (try? c.decode(UInt16.self, forKey: .keyCode)) ?? Self.unsetKeyCode,
             modifiers: (try? c.decode(UInt64.self, forKey: .modifiers)) ?? 0
         )
     }

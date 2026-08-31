@@ -85,12 +85,17 @@ enum SelfCheck {
         group("动作选择器") {
             actionKindRoundTrip()
             preservesShortcutPayload()
+            unsetShortcutIsInertAndVisible()
             groupsAreComplete()
         }
         group("冲突检测") {
             detectsDebugBuilds()
             deduplicatesPerProduct()
             ignoresUnrelatedApps()
+        }
+        group("应用元数据与生命周期") {
+            activationLeaseIsIdempotent()
+            versionFallbackIsHonest()
         }
         group("偏好设置") {
             clampsOutOfRange()
@@ -135,6 +140,7 @@ enum SelfCheck {
         }
         group("系统快捷键") {
             windowManagementStrokesCarryFn()
+            rejectsInvalidSystemHotkeyNumbers()
         }
         group("更新检查") {
             hasDefaultUpdateSource()
@@ -829,6 +835,28 @@ enum SelfCheck {
         )
     }
 
+    private static func unsetShortcutIsInertAndVisible() {
+        let action = ActionKind.keyStroke.makeAction(preserving: .passthrough)
+        guard case let .keyStroke(combo) = action else {
+            expect(false, "选择自定义快捷键会产生可表示的未设置状态")
+            return
+        }
+
+        expect(combo == .unset && !combo.isSet, "未录入快捷键使用 UInt16.max 哨兵，不冒充真实按键")
+        expect(
+            combo.valueIfSet == nil && Strings.buttonRecordShortcut.contains("未设置"),
+            "未录入状态在录制控件里明确显示为未设置"
+        )
+
+        var posted: [UInt16] = []
+        let runner = ActionRunner { code, _ in posted.append(code) }
+        runner.run(action)
+        expect(posted.isEmpty, "未录入的自定义快捷键不会到达按键投递边界")
+
+        runner.run(.keyStroke(KeyCombo(keyCode: 0, modifiers: 0)))
+        expect(posted == [0], "键码 0 仍是可录入的真实按键，不再承担空值哨兵")
+    }
+
     private static func groupsAreComplete() {
         // The picker renders `ungrouped` at the top level and `groups` as submenus. Anything
         // missing from both is an action the user simply cannot select.
@@ -872,6 +900,36 @@ enum SelfCheck {
             ("com.mosaic.something", "Mosaic")
         ])
         expect(found.isEmpty, "名字里带 mos 的无关应用不会误报")
+    }
+
+    private static func activationLeaseIsIdempotent() {
+        MainActor.assumeIsolated {
+            var enters = 0
+            var leaves = 0
+            let lease = AppActivationLease(
+                onEnter: { enters += 1 },
+                onLeave: { leaves += 1 }
+            )
+
+            lease.enter()
+            lease.enter()
+            expect(enters == 1 && lease.isHeld, "重复显示同一窗口只取得一次激活策略引用")
+            lease.leave()
+            lease.leave()
+            expect(leaves == 1 && !lease.isHeld, "关闭窗口只释放一次引用并恢复幂等空闲态")
+        }
+    }
+
+    private static func versionFallbackIsHonest() {
+        expect(
+            AppVersion.value("CFBundleShortVersionString", in: nil) == AppVersion.unknown,
+            "读取不到 Info.plist 版本时显示未知，不伪装成旧版本号"
+        )
+        expect(
+            AppVersion.value("CFBundleShortVersionString", in: ["CFBundleShortVersionString": "2.3.4"])
+                == "2.3.4",
+            "应用版本只取自 Info.plist 提供的值"
+        )
     }
 
     // MARK: Preferences
@@ -1388,6 +1446,33 @@ enum SelfCheck {
         expect(
             SystemHotkeys.Resolution.disabledBySystem != .stroke(SystemHotkeys.defaults[.missionControl]!),
             "被系统关闭的快捷键与可用快捷键是两种不同结果，不会静默当成可用"
+        )
+    }
+
+    private static func rejectsInvalidSystemHotkeyNumbers() {
+        func entry(keyCode: Int, modifiers: Int) -> [String: Any] {
+            [
+                "enabled": true,
+                "value": ["parameters": [0, keyCode, modifiers]]
+            ]
+        }
+
+        expect(
+            SystemHotkeys.resolution(from: entry(keyCode: 70_000, modifiers: 0)) == .disabledBySystem,
+            "用户 plist 里的超大键码安全降级，不在 UInt16 窄化时崩溃"
+        )
+        expect(
+            SystemHotkeys.resolution(from: entry(keyCode: -1, modifiers: 0)) == .disabledBySystem,
+            "用户 plist 里的负键码安全降级"
+        )
+        expect(
+            SystemHotkeys.resolution(from: entry(keyCode: 12, modifiers: -1)) == .disabledBySystem,
+            "用户 plist 里的负修饰键安全降级，不在 UInt64 窄化时崩溃"
+        )
+        expect(
+            SystemHotkeys.resolution(from: entry(keyCode: 12, modifiers: 1_048_576))
+                == .stroke(SystemHotkeys.Stroke(keyCode: 12, flags: CGEventFlags(rawValue: 1_048_576))),
+            "可表示的系统快捷键仍按原值解析"
         )
     }
 

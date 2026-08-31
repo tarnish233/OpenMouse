@@ -40,8 +40,15 @@ final class SettingsNavigation {
 }
 
 enum AppVersion {
-    static let short: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
-    static let build: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    static let unknown = "未知"
+
+    static func value(_ key: String, in info: [String: Any]?) -> String {
+        guard let value = info?[key] as? String, !value.isEmpty else { return unknown }
+        return value
+    }
+
+    static let short = value("CFBundleShortVersionString", in: Bundle.main.infoDictionary)
+    static let build = value("CFBundleVersion", in: Bundle.main.infoDictionary)
     static let displayString: String = "\(short) (\(build))"
 }
 

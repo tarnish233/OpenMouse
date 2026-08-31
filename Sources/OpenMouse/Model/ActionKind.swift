@@ -296,7 +296,7 @@ enum ActionKind: String, CaseIterable, Identifiable {
         case .logout: .logout
         case .invertColors: .invertColors
         case .keyStroke:
-            if case .keyStroke = current { current } else { .keyStroke(KeyCombo(keyCode: 0, modifiers: 0)) }
+            if case .keyStroke = current { current } else { .keyStroke(.unset) }
         case .launchApp:
             if case .launchApp = current { current } else { .launchApp(path: "") }
         }

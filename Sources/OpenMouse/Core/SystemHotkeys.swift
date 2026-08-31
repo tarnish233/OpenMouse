@@ -125,6 +125,13 @@ enum SystemHotkeys {
               let entry = hotkeys[String(hotkey.rawValue)] as? [String: Any]
         else { return nil }
 
+        return resolution(from: entry)
+    }
+
+    /// Parse one user-writable plist entry without trapping on negative or oversized numbers.
+    /// Structural damage means "no opinion" (fall back to the shipped default); a present but
+    /// unrepresentable shortcut is disabled rather than guessed.
+    static func resolution(from entry: [String: Any]) -> Resolution? {
         if let enabled = entry["enabled"] as? Bool, !enabled {
             return .disabledBySystem
         }
@@ -136,10 +143,17 @@ enum SystemHotkeys {
               let modifiers = parameters[2] as? Int
         else { return nil }
 
-        // 65535 is the placeholder for "no key", which is how a shortcut with nothing bound to
-        // it is recorded. Posting key 65535 would be a no-op with a plausible-looking log line.
-        guard keyCode != 65535 else { return .disabledBySystem }
+        // UInt16.max is the placeholder for "no key", which is how a shortcut with nothing
+        // bound to it is recorded. Any other unrepresentable user-edited value is equally
+        // unusable and must not be allowed to trap during narrowing.
+        guard keyCode != Int(UInt16.max),
+              let narrowedKeyCode = UInt16(exactly: keyCode),
+              let rawModifiers = UInt64(exactly: modifiers)
+        else { return .disabledBySystem }
 
-        return .stroke(Stroke(keyCode: UInt16(keyCode), flags: CGEventFlags(rawValue: UInt64(modifiers))))
+        return .stroke(Stroke(
+            keyCode: narrowedKeyCode,
+            flags: CGEventFlags(rawValue: rawModifiers)
+        ))
     }
 }
