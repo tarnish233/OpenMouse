@@ -153,7 +153,7 @@ enum Strings {
     // Updates
     static let updateSection = "更新"
     static let updateAuto = "自动检查更新"
-    static let updateAutoHelp = "每天最多检查一次，直接读取 GitHub Releases。社区发布包需手动下载替换。"
+    static let updateAutoHelp = "每天最多检查一次，直接读取 GitHub Releases。下载的新版本必须由当前版本的同一签名身份签发才会安装。"
     static let updateCheckNow = "立即检查"
     static let updateChecking = "正在检查…"
     static let updateNotConfigured = "未配置更新源"
@@ -167,5 +167,8 @@ enum Strings {
     static let updateOpen = "查看发布页"
     static let updateDownloadManually = "手动下载"
     static let updateSkip = "跳过此版本"
+    static func updateSkipped(_ version: String) -> String { "已跳过 \(version)" }
+    static let updateUnskip = "取消跳过"
+    static let updateQuitRefused = "Open Mouse 没有退出，更新未安装。请手动退出后重试。"
     static func updateLastChecked(_ text: String) -> String { "上次检查：\(text)" }
 }

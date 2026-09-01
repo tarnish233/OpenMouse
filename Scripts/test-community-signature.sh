@@ -58,6 +58,20 @@ expected_public_sha1="$(openssl x509 -inform der -in Resources/OpenMouseCommunit
 checks=$((checks + 1))
 echo "   ✓ 仓库公开证书指纹固定为 $sha1"
 
+# The in-app update gate pins the same fingerprint in Swift. The certificate is not bundled, so
+# the two copies cannot be compared at runtime -- if they ever drift, community builds silently
+# stop offering automatic installation. Checked here instead.
+gate_source="Sources/OpenMouseUpdateSupport/UpdateCodeSignature.swift"
+grep -q "communitySigningCertificateSHA1 = \"$sha1\"" "$gate_source"
+checks=$((checks + 1))
+echo "   ✓ 应用内更新门槛钉住同一指纹 $sha1"
+
+# Fingerprint, not common name: a self-signed subject is not a credential.
+grep -q 'leafSHA1.caseInsensitiveCompare(communitySigningCertificateSHA1)' "$gate_source"
+! grep -q 'commonName == "Open Mouse Community Signing"' "$gate_source"
+checks=$((checks + 1))
+echo "   ✓ 社区身份按证书指纹判定而不是按证书名称"
+
 grep -q 'COMMUNITY_DISTRIBUTION=1 ./Scripts/bundle.sh' Makefile
 grep -q 'sign-community-app.sh' Scripts/bundle.sh
 grep -q 'smoke-testing signed release executables' Scripts/bundle.sh

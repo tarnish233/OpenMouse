@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 333 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
+make test     # 应用自检 347 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -153,6 +153,26 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 **被吞掉的按下拥有它的抬起。** `EventRouter` 在 mouse-down 时记录 claim；mouse-up 只按这份会话状态收尾，不能重新解析当时的修饰键、绑定或前台应用。任何 tap 重建、权限丢失、引擎关闭与自动恢复都必须经统一 teardown 清掉 claim、gesture session、motion tap 和权限轮询。
 
+## Logitech HID++
+
+**厂商 ID `0x046D` 是第一道过滤，非 Logitech 鼠标完全不适用。** HID++ 是 Logitech 私有协议，DPI 走 feature `0x2201 ADJUSTABLE_DPI`；别的品牌没有这套东西，这不是没做而是做不到。
+
+三条实现范围限制，写清楚是因为它们在界面上**完全看不出来**：
+
+1. **只支持蓝牙直连。** `LogitechHIDPPManager.attach()` 要求 transport 含 `bluetooth` 且 primary usage 为 `0x0001`/`0x0002`。Bolt / Unifying 接收器在 IOKit 里 transport 是 `USB`，直接被挡；就算放行，device index 也写死了 `0xFF`（直连寻址），接收器需要 1–6。USB 有线的 HID++ 端点 usage 是 `0xFF43`/`0x0202`，同样过不了。**这个 `return` 之前没有任何日志**，所以「插了 Bolt 接收器」和「压根没接鼠标」在日志里长得一模一样。
+2. **DPI 档位按 M750 硬编码** 400–4000 / 100 步进（`LogitechDPILevels.swift`），从不调 `getSensorDPIList`。MX Master 3S 的 4000–8000 段和 50 步进拿不到。
+3. **`0x1B04 REPROG_CONTROLS_V4` 是 DPI 的硬前置。** 不支持它的鼠标 `stage = .failed`，DPI 一并失效——这是实现耦合，不是设备的锅。
+
+**`.failed` 是终态，除了蓝牙重连或重启 App 没有任何重试。** 蓝牙鼠标在 App 启动那一刻恰好省电休眠，discovery 1.5s 超时后 DPI 键就永久失效。
+
+链路挂掉时 **UI 零反馈**：「没找到设备」「不支持」「没给输入监控权限」「超时」四种情况在界面上完全一样——两个档位照常可点，只是不高亮、不显示「当前 XXXX DPI」。诊断只能看日志，category 是 `hidpp`：
+
+```bash
+/usr/bin/log stream --predicate 'subsystem == "com.openmouse.OpenMouse" && category == "hidpp"'
+```
+
+只有 `manager started` 而没有 `device connected` 就是第 1 条的过滤没过。自检那组**只覆盖纯编解码，IOKit 侧零覆盖**——全绿完全不能说明某只鼠标能用。
+
 ## 约定
 
 - `.swiftLanguageMode(.v5)`。事件 tap 天生是 C 函数指针回调 + `Unmanaged`，Swift 6 的严格隔离会让这层充满仪式性样板。不要为了「现代化」把它切到 v6。
@@ -188,6 +208,21 @@ TCC 通过 bundle id 与 Designated Requirement 识别同一应用。`v0.4.0` �
 维护者登录钥匙串中有该证书时，日常 `make app` / `make debug` 也使用固定身份，避免每次重建测试包都重置 TCC；没有私钥的贡献者仍回落 ad-hoc。第二台发布 Mac 只能导入同一个加密 `.p12`，运行 `Scripts/import-community-signing-identity.sh /path/to/OpenMouseCommunitySigning.p12`，绝不能创建同名新证书。当前 Mac 的加密备份在 `~/Library/Application Support/OpenMouse Signing/OpenMouseCommunitySigning.p12`，密码保存在登录钥匙串服务 `Open Mouse Community Signing Backup Password`；仍需把 `.p12` 另存到安全的离线位置。
 
 `make dist` 与社区发布的签名策略不同：正式发布必须显式传 `CODESIGN_IDENTITY`，使用 Developer ID Application + hardened runtime + Apple 安全时间戳；`make dist-community` 必须找到仓库公开证书对应的固定私钥，使用 self-signed certificate + hardened runtime + 无时间戳，并同时验证 Authority、runtime flags、TeamIdentifier 和精确 Requirement。两个发布路径都实际启动主程序与更新助手做冒烟检查。不要为了“先出包”绕过任一签名校验。
+
+## 应用内更新
+
+两道门，别把它们搞混：
+
+1. **`supportsAutomaticInstallation`（`UpdateCodeSignature.swift`）只决定 UI 提不提供「下载并安装」。** 认两种身份：`Developer ID Application:` 前缀，或 leaf 证书 SHA-1 等于 `communitySigningCertificateSHA1`。**必须按指纹判，不能按证书名称**——自签名证书的 CN 谁都能伪造，按名字匹配等于没设防。这个常量在 Swift 和 `Scripts/community-signing.sh` 里各存一份，证书没进 bundle 所以运行时无法比对，由 `Scripts/test-community-signature.sh` 钉住两份一致。
+2. **`validate(candidateURL:matchesCurrentAppAt:)` 才是真正的安全边界**：要求下载包满足**当前运行包自己的** Designated Requirement。社区包的 DR 已经锁定证书指纹，所以放开第 1 道门不会放宽实际装进去的东西。更新助手在宿主退出后**再校验一次**，闭合校验与换盘之间的窗口。
+
+ad-hoc 包永远不可能自动更新——它的 DR 是每次构建都变的 CDHash，下一个版本不可能满足。`v0.6.1` 及更早的用户必须手动装一次。
+
+`UpdateHandoff`（`OpenMouseUpdateSupport`）里两个超时的**顺序**是不变量：宿主 12s 放弃等待自身退出，助手 30s 放弃等待宿主。宿主必须先认输，否则 `installationState` 卡在 `.installing`、`isBusy` 恒真，`reconcileAutomaticSchedule` / `launchAutomaticCheck` / `check` 三处 guard 全部短路——整个进程生命周期内更新检查彻底死掉，界面还留着转圈。`NSApp.terminate` 是请求不是保证，兜底定时器必须挂在 `.common` 模式，否则模态循环里不触发。
+
+安装位置在**下载之前**检查（`ApplicationReplacement.locationProblem`）：App Translocation 只读副本按路径含 `AppTranslocation` 识别（`SecTranslocateIsTranslocatedURL` 没有 Swift 绑定），容器不可写另算一种。没有任何更新包能让只读位置变可写，所以先花流量再失败是纯浪费。
+
+诊断为什么没有安装按钮：`OpenMouseUpdater --describe-auto-install <app 路径>`，打印身份、指纹和判定原因。加它是因为 `supportsAutomaticInstallation` 把五种不同失败全折叠成 `false`，「没有按钮」原本无法回答。
 
 ## git
 

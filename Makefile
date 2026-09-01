@@ -55,7 +55,8 @@ dist:
 	@shasum -a 256 "build/OpenMouse-$(VERSION).zip"
 
 ## Zip a launchable build signed with the repository-pinned self-signed identity.
-## It is not notarized; upgrades remain manual, but the TCC requirement stays stable.
+## It is not notarized. The TCC requirement stays stable, and because the requirement pins the
+## certificate rather than a per-build CDHash, in-app updates work between these builds.
 dist-community:
 	COMMUNITY_DISTRIBUTION=1 ./Scripts/bundle.sh
 	rm -f "build/OpenMouse-$(VERSION).zip"

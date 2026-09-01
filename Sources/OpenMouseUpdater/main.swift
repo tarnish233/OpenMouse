@@ -54,7 +54,7 @@ enum OpenMouseUpdater {
     }
 
     private static func waitForExit(pid: pid_t) throws {
-        let deadline = Date.now.addingTimeInterval(30)
+        let deadline = Date.now.addingTimeInterval(UpdateHandoff.hostExitTimeout)
         while kill(pid, 0) == 0 || errno == EPERM {
             guard Date.now < deadline else { throw Failure.applicationDidNotExit }
             Thread.sleep(forTimeInterval: 0.1)
@@ -118,6 +118,16 @@ if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--validate-sig
         FileHandle.standardError.write(Data("签名身份不连续：\(error.localizedDescription)\n".utf8))
         exit(1)
     }
+}
+
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--describe-auto-install" {
+    let report = UpdateCodeSignature.describeAutomaticInstallation(
+        at: URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+    )
+    print("身份: \(report.commonName ?? "（无证书）")")
+    print("指纹: \(report.leafSHA1 ?? "（无证书）")")
+    print("\(report.isSupported ? "✓" : "✗") \(report.detail)")
+    exit(report.isSupported ? 0 : 1)
 }
 
 do {

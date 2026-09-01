@@ -25,6 +25,18 @@ enum UpdatePolicy {
               release.version != skippedVersion else { return nil }
         return release
     }
+
+    /// The release that is being withheld only because it was skipped. Surfacing it is what gives
+    /// "跳过此版本" a way back: without this the choice is permanent and invisible.
+    static func skippedRelease(
+        outcome: UpdateChecker.Outcome?,
+        skippedVersion: String?
+    ) -> UpdateChecker.Release? {
+        guard case let .available(release) = outcome,
+              let skippedVersion,
+              release.version == skippedVersion else { return nil }
+        return release
+    }
 }
 
 /// Owns update-check state for the UI: what the last check found, whether one is in flight,
@@ -49,6 +61,8 @@ final class UpdateCoordinator {
 
     static let shared = UpdateCoordinator()
 
+    private static let terminationGrace = UpdateHandoff.terminationGrace
+
     private(set) var outcome: UpdateChecker.Outcome?
     private(set) var isChecking = false
     private(set) var lastCheckedAt: Date?
@@ -61,6 +75,7 @@ final class UpdateCoordinator {
     private var wakeObserver: NSObjectProtocol?
     private var didStartAutomaticScheduling = false
     private var retryNotBefore: Date?
+    private var terminationFallback: Timer?
 
     private init() {
         canInstallAutomatically = UpdateCodeSignature.supportsAutomaticInstallation(
@@ -71,6 +86,14 @@ final class UpdateCoordinator {
     /// The release the user should be told about: newer, and not one they chose to skip.
     var pendingRelease: UpdateChecker.Release? {
         UpdatePolicy.pendingRelease(
+            outcome: outcome,
+            skippedVersion: store.preferences.update.skippedVersion
+        )
+    }
+
+    /// A newer release currently hidden by "跳过此版本", so the UI can offer to unhide it.
+    var skippedRelease: UpdateChecker.Release? {
+        UpdatePolicy.skippedRelease(
             outcome: outcome,
             skippedVersion: store.preferences.update.skippedVersion
         )
@@ -207,6 +230,11 @@ final class UpdateCoordinator {
         store.preferences.update.skippedVersion = release.version
     }
 
+    func clearSkip() {
+        guard !installationState.isBusy else { return }
+        store.preferences.update.skippedVersion = nil
+    }
+
     func install(_ release: UpdateChecker.Release) async {
         guard !installationState.isBusy else { return }
         installationState = .downloading(release.version)
@@ -220,11 +248,38 @@ final class UpdateCoordinator {
             installationState = .installing(prepared.version)
             store.saveNow()
             try UpdateInstaller.launch(prepared, parentPID: getpid())
+            // Armed before asking to quit, and on .common so it still fires from a modal loop:
+            // `terminate` is a request the app or a modal panel can refuse. Without this the
+            // .installing state — and therefore `isBusy` — would stick for the rest of the
+            // process, short-circuiting every future check while the UI kept spinning.
+            armTerminationFallback()
             NSApp.terminate(nil)
         } catch {
             installationState = .failed(error.localizedDescription)
             reconcileAutomaticSchedule()
         }
+    }
+
+    private func armTerminationFallback() {
+        terminationFallback?.invalidate()
+        let timer = Timer(
+            timeInterval: Self.terminationGrace,
+            repeats: false
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.recoverFromRefusedTermination() }
+        }
+        terminationFallback = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// Still running well past the quit request, so the swap will not happen. The helper gives the
+    /// parent 30s before it gives up, so this deliberately fires earlier: the user learns why
+    /// nothing happened while the helper is still waiting, rather than after it has bailed out.
+    private func recoverFromRefusedTermination() {
+        terminationFallback = nil
+        guard case .installing = installationState else { return }
+        installationState = .failed(Strings.updateQuitRefused)
+        reconcileAutomaticSchedule()
     }
 
     func open(_ release: UpdateChecker.Release) {

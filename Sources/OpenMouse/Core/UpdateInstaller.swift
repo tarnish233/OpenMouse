@@ -20,6 +20,7 @@ enum UpdateInstaller {
         case unexpectedVersion(expected: String, actual: String)
         case missingUpdater
         case updaterNotExecutable
+        case cannotReplaceInPlace(ApplicationReplacement.LocationProblem)
 
         var errorDescription: String? {
             switch self {
@@ -33,6 +34,7 @@ enum UpdateInstaller {
                 "更新包版本不匹配（期望 \(expected)，实际 \(actual)）"
             case .missingUpdater: "当前应用缺少更新安装助手"
             case .updaterNotExecutable: "更新安装助手不可执行"
+            case let .cannotReplaceInPlace(problem): problem.errorDescription
             }
         }
     }
@@ -42,6 +44,12 @@ enum UpdateInstaller {
         repository: String,
         currentBundleURL: URL
     ) async throws -> PreparedUpdate {
+        // Checked before downloading: no archive can make a read-only or translocated install
+        // location replaceable, so spending the download first would only delay the same error.
+        if let problem = ApplicationReplacement.locationProblem(for: currentBundleURL) {
+            throw Failure.cannotReplaceInPlace(problem)
+        }
+
         guard let downloadURL = UpdateChecker.archiveURL(for: release, repository: repository) else {
             throw Failure.invalidDownloadURL
         }

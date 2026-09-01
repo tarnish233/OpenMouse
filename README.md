@@ -18,9 +18,9 @@ macOS 菜单栏小工具，做三件事：
 
 1. **首次打开会被拦下来** —— 本版本没有 Developer ID 与 Apple 公证。双击后到「系统设置 › 隐私与安全性」，在下方找到提示点「仍要打开」。
 2. **授予辅助功能权限** —— 系统设置 › 隐私与安全性 › 辅助功能 → 打开 Open Mouse。授权后一秒内自动接管，不用重启应用。
-3. **Logitech HID++ 设备还需输入监控** —— 系统设置 › 隐私与安全性 › 输入监控 → 打开 Open Mouse，才能可靠读取 Bolt / Unifying / 蓝牙直连设备的物理按住与抬起。
+3. **Logitech HID++ 设备还需输入监控** —— 系统设置 › 隐私与安全性 › 输入监控 → 打开 Open Mouse，才能可靠读取蓝牙直连 Logitech 鼠标的物理按住与抬起。
 
-当前 GitHub 二进制是未公证的固定自签名社区发布包。自 `v0.6.1` 起，每个版本都由同一张证书与显式 Designated Requirement 签名；从旧 ad-hoc 版本迁移时需要最后重新授权一次，之后正常替换升级通常会保留辅助功能 / 输入监控权限。升级仍需手动下载并替换应用。
+当前 GitHub 二进制是未公证的固定自签名社区发布包。自 `v0.6.1` 起，每个版本都由同一张证书与显式 Designated Requirement 签名；从旧 ad-hoc 版本迁移时需要最后重新授权一次，之后正常替换升级通常会保留辅助功能 / 输入监控权限。自 `v0.6.2` 起支持应用内自动更新：下载的新版本必须满足当前版本自己的 Designated Requirement（即由同一张证书签发）才会被安装。
 
 配置存在 `~/Library/Application Support/OpenMouse/preferences.json`，是给人看的 JSON，可以直接编辑。
 
@@ -73,7 +73,7 @@ macOS 菜单栏小工具，做三件事：
 - **应用例外**：为指定应用完全不干预，或使用独立的滚动参数；菜单栏可一键为最前面的应用停用
 - **冲突检测**：同类软件在运行时直接点名
 - **实时诊断**：拦截了多少、合成了多少、帧源是 vsync 还是定时器兜底、事件投给了哪个进程
-- **更新检查**：直接读取 GitHub Releases（不使用限流 API）；Developer ID 发布包可验证同一签名后自动安装，社区发布包跳转发布页手动下载
+- **更新检查**：直接读取 GitHub Releases（不使用限流 API）；验证新包满足当前版本自己的 Designated Requirement 后应用内自动安装并重启，Developer ID 与固定社区证书两种发布身份都支持
 - **登录时启动**
 - 空闲时零开销：没有滚动时帧源会销毁，事件掩码只订阅当前配置真正需要的事件
 
@@ -92,7 +92,7 @@ make dist       # Developer ID 发布包（需要显式传入证书）
 make dist-community # 无 Developer ID 时，使用固定自签名证书打包未公证版本
 ```
 
-`v0.3.0` 使用过 Apple Development 签名，独立更新助手会被其他 Mac 拒绝启动；`v0.4.0` 至 `v0.6.0` 改为 ad-hoc 社区包，但 CDHash 每版变化会重置 TCC 权限。自 `v0.6.1` 起社区包固定使用仓库公开证书 `Resources/OpenMouseCommunitySigning.cer` 对应的自签名身份，Requirement 同时锁定 Bundle ID 与证书指纹。私钥只存在发布者钥匙串和加密 `.p12` 备份中。社区包仍未公证且手动升级；只有 `make dist` 生成的 Developer ID 发布包才启用应用内安装。若授权条目变成勾了也不生效的幽灵项，用 `make tcc-reset` 清掉重来。
+`v0.3.0` 使用过 Apple Development 签名，独立更新助手会被其他 Mac 拒绝启动；`v0.4.0` 至 `v0.6.0` 改为 ad-hoc 社区包，但 CDHash 每版变化会重置 TCC 权限。自 `v0.6.1` 起社区包固定使用仓库公开证书 `Resources/OpenMouseCommunitySigning.cer` 对应的自签名身份，Requirement 同时锁定 Bundle ID 与证书指纹。私钥只存在发布者钥匙串和加密 `.p12` 备份中。社区包仍未公证，但自 `v0.6.2` 起启用应用内安装：门槛按证书**指纹**（不是证书名称，自签名证书的名称谁都能伪造）识别固定社区身份，`make dist` 的 Developer ID 包同样启用。从 `v0.6.1` 之前的 ad-hoc 版本升级仍需手动下载一次，因为 ad-hoc 的 Requirement 是每版变化的 CDHash，新包不可能满足它。若授权条目变成勾了也不生效的幽灵项，用 `make tcc-reset` 清掉重来。
 
 命令行开关：
 
@@ -107,7 +107,7 @@ OpenMouseUpdater --validate-signature old.app new.app # 验证两个 Developer I
 
 ## 已知限制
 
-- **HID++ 当前聚焦可编程按钮与 M750 DPI 切换** —— 已支持 Bolt / Unifying / 蓝牙直连设备的按钮识别与物理按住状态；M750 系列的 DPI 键可以录入，并在两个可配置的硬件 DPI 档位之间切换。SmartShift 和高分辨率滚轮开关尚未实现
+- **HID++ 当前聚焦可编程按钮与 M750 DPI 切换** —— **只支持蓝牙直连的 Logitech 鼠标**：Bolt / Unifying 接收器与 USB 有线连接都不走这条路径（接收器需要 1–6 的 device index，当前实现固定用 `0xFF` 直连寻址）。M750 系列的 DPI 键可以录入，并在两个可配置的硬件 DPI 档位之间切换，档位表按 M750 家族固定为 400–4000 / 100 步进，不读取设备自己上报的档位。非 Logitech 鼠标（厂商 ID 不是 `0x046D`）完全不适用。SmartShift 和高分辨率滚轮开关尚未实现
 - **未做指针加速**（LinearMouse 覆盖这块）
 - 界面目前只有中文文案，都在 `Strings.swift` 里
 - 没有做 Apple 公证

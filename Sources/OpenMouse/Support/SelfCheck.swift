@@ -234,6 +234,8 @@ enum SelfCheck {
             automaticScheduleUsesWallClock()
             updateRequestHasHardResourceDeadline()
             skippedReleaseIsFiltered()
+            updateHandoffGivesUpHostFirst()
+            refusesToReplaceUnwritableInstallLocation()
             parsesReleaseRedirect()
             constructsReleaseArchiveURL()
             rejectsUnexpectedReleaseURLs()
@@ -2926,6 +2928,67 @@ enum SelfCheck {
             UpdatePolicy.pendingRelease(outcome: outcome, skippedVersion: "v9.9.8") == release,
             "跳过旧版本不会隐藏后来发布的新版本"
         )
+
+        // Skipping is reversible, so the hidden release has to be recoverable for the UI.
+        expect(
+            UpdatePolicy.skippedRelease(outcome: outcome, skippedVersion: release.version) == release,
+            "被跳过的版本仍可取回，界面才能提供「取消跳过」"
+        )
+        expect(
+            UpdatePolicy.skippedRelease(outcome: outcome, skippedVersion: nil) == nil,
+            "没有跳过任何版本时不显示取消跳过"
+        )
+        expect(
+            UpdatePolicy.skippedRelease(outcome: outcome, skippedVersion: "v9.9.8") == nil,
+            "跳过的是别的版本时不把当前新版本说成已跳过"
+        )
+        expect(
+            UpdatePolicy.skippedRelease(outcome: .upToDate(current: "v9.9.9"), skippedVersion: "v9.9.9") == nil,
+            "没有可用新版本时不提示已跳过"
+        )
+    }
+
+    /// The host must admit that its own termination was refused while the helper is still waiting,
+    /// otherwise the install silently dies and the busy state blocks every later check.
+    private static func updateHandoffGivesUpHostFirst() {
+        expect(
+            UpdateHandoff.terminationGrace < UpdateHandoff.hostExitTimeout,
+            "宿主放弃等待自身退出必须早于更新助手放弃等待宿主"
+        )
+        expect(UpdateHandoff.terminationGrace > 0, "终止兜底必须真的会触发")
+    }
+
+    /// Location is checked before the download because no archive can make a read-only install
+    /// location replaceable.
+    private static func refusesToReplaceUnwritableInstallLocation() {
+        let translocated = URL(
+            fileURLWithPath: "/private/var/folders/ab/cd/d/AppTranslocation/1234/d/Open Mouse.app"
+        )
+        expect(
+            ApplicationReplacement.isTranslocated(translocated),
+            "识别 App Translocation 只读副本"
+        )
+        expect(
+            ApplicationReplacement.locationProblem(
+                for: translocated,
+                isWritable: { _ in true }
+            ) == .translocated,
+            "从只读副本运行时不尝试原地替换，即使目录看起来可写"
+        )
+
+        let installed = URL(fileURLWithPath: "/Applications/Open Mouse.app")
+        expect(!ApplicationReplacement.isTranslocated(installed), "普通安装路径不会被误判为只读副本")
+        expect(
+            ApplicationReplacement.locationProblem(for: installed, isWritable: { _ in true }) == nil,
+            "可写的正常安装位置允许原地替换"
+        )
+        expect(
+            ApplicationReplacement.locationProblem(
+                for: installed,
+                isWritable: { _ in false }
+            ) == .containerNotWritable,
+            "安装位置不可写时先报明确原因，而不是下载完再失败"
+        )
     }
 
     private static func parsesReleaseRedirect() {
@@ -2965,27 +3028,54 @@ enum SelfCheck {
     }
 
     private static func rejectsUnexpectedReleaseURLs() {
+        let unrelatedSHA1 = "1111111111111111111111111111111111111111"
         expect(
             UpdateCodeSignature.signerSupportsAutomaticInstallation(
-                "Developer ID Application: Example (TEAM123)"
+                commonName: "Developer ID Application: Example (TEAM123)",
+                leafSHA1: unrelatedSHA1
             ),
             "Developer ID Application 发布包可启用应用内安装"
         )
         expect(
             !UpdateCodeSignature.signerSupportsAutomaticInstallation(
-                "Apple Development: Example (TEAM123)"
+                commonName: "Apple Development: Example (TEAM123)",
+                leafSHA1: unrelatedSHA1
             ),
             "Apple Development 不是可分发的自动更新身份"
         )
         expect(
-            !UpdateCodeSignature.signerSupportsAutomaticInstallation(
-                "Open Mouse Community Signing"
+            UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                commonName: "Open Mouse Community Signing",
+                leafSHA1: UpdateCodeSignature.communitySigningCertificateSHA1
             ),
-            "固定自签名社区包保留身份连续性，但仍只提供手动下载"
+            "指纹钉死的固定社区证书可启用应用内安装"
+        )
+        // The whole point of pinning by fingerprint: a self-signed certificate's subject is not a
+        // credential, so anyone can mint one that calls itself by this name.
+        expect(
+            !UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                commonName: "Open Mouse Community Signing",
+                leafSHA1: unrelatedSHA1
+            ),
+            "自签名证书的名称不是凭据：同名但指纹不符必须拒绝"
         )
         expect(
-            !UpdateCodeSignature.signerSupportsAutomaticInstallation(nil),
+            UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                commonName: nil,
+                leafSHA1: UpdateCodeSignature.communitySigningCertificateSHA1.lowercased()
+            ),
+            "指纹比对不区分大小写，且不因读不出证书名称而否决"
+        )
+        expect(
+            !UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                commonName: nil,
+                leafSHA1: nil
+            ),
             "ad-hoc 发布包只提供手动下载，不尝试签名连续安装"
+        )
+        expect(
+            UpdateCodeSignature.communitySigningCertificateSHA1.count == 40,
+            "社区证书指纹是 40 位十六进制 SHA-1"
         )
 
         expect(UpdateChecker.latestReleasePageURL(repository: "owner") == nil, "缺少仓库名时拒绝构造更新地址")

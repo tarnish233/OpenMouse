@@ -322,6 +322,16 @@ private struct UpdateSection: View {
                     }
                 }
                 .padding(.vertical, 2)
+            } else if let skipped = updates.skippedRelease {
+                // Skipping used to be a one-way door: the banner vanished with no way back, so a
+                // mis-tap hid that version for good.
+                HStack(spacing: 8) {
+                    Label(Strings.updateSkipped(skipped.version), systemImage: "bell.slash")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button(Strings.updateUnskip) { updates.clearSkip() }
+                        .controlSize(.small)
+                }
             }
         }
     }
