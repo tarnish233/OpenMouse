@@ -20,7 +20,7 @@ macOS 菜单栏小工具，做三件事：
 2. **授予辅助功能权限** —— 系统设置 › 隐私与安全性 › 辅助功能 → 打开 Open Mouse。授权后一秒内自动接管，不用重启应用。
 3. **Logitech HID++ 设备还需输入监控** —— 系统设置 › 隐私与安全性 › 输入监控 → 打开 Open Mouse，才能可靠读取 Bolt / Unifying / 蓝牙直连设备的物理按住与抬起。
 
-当前 GitHub 二进制是未公证的 ad-hoc 社区发布包。升级时需要手动下载并替换应用，macOS 也可能要求重新授予辅助功能 / 输入监控权限。
+当前 GitHub 二进制是未公证的固定自签名社区发布包。自 `v0.6.1` 起，每个版本都由同一张证书与显式 Designated Requirement 签名；从旧 ad-hoc 版本迁移时需要最后重新授权一次，之后正常替换升级通常会保留辅助功能 / 输入监控权限。升级仍需手动下载并替换应用。
 
 配置存在 `~/Library/Application Support/OpenMouse/preferences.json`，是给人看的 JSON，可以直接编辑。
 
@@ -89,10 +89,10 @@ make run        # 构建并启动正式名称的本地包
 make install    # 拷到 /Applications 并启动（登录项注册需要装在这里）
 make test       # 跑全部内置自检
 make dist       # Developer ID 发布包（需要显式传入证书）
-make dist-community # 无 Developer ID 时，打包可启动的 ad-hoc 未公证版本
+make dist-community # 无 Developer ID 时，使用固定自签名证书打包未公证版本
 ```
 
-`v0.3.0` 使用了 Apple Development 签名：主应用经“仍要打开”后可以运行，但独立更新助手仍会被 macOS 拒绝启动，因此不能完成应用内安装。自 `v0.4.0` 起恢复为 ad-hoc 社区发布包，升级必须手动替换，并可能需要重新授予辅助功能 / 输入监控权限。只有使用 `make dist` 生成的 Developer ID 发布包才启用同签名应用内安装。若授权条目变成勾了也不生效的幽灵项，用 `make tcc-reset` 清掉重来。
+`v0.3.0` 使用过 Apple Development 签名，独立更新助手会被其他 Mac 拒绝启动；`v0.4.0` 至 `v0.6.0` 改为 ad-hoc 社区包，但 CDHash 每版变化会重置 TCC 权限。自 `v0.6.1` 起社区包固定使用仓库公开证书 `Resources/OpenMouseCommunitySigning.cer` 对应的自签名身份，Requirement 同时锁定 Bundle ID 与证书指纹。私钥只存在发布者钥匙串和加密 `.p12` 备份中。社区包仍未公证且手动升级；只有 `make dist` 生成的 Developer ID 发布包才启用应用内安装。若授权条目变成勾了也不生效的幽灵项，用 `make tcc-reset` 清掉重来。
 
 命令行开关：
 

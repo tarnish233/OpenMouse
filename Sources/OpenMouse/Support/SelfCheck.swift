@@ -2978,6 +2978,12 @@ enum SelfCheck {
             "Apple Development 不是可分发的自动更新身份"
         )
         expect(
+            !UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                "Open Mouse Community Signing"
+            ),
+            "固定自签名社区包保留身份连续性，但仍只提供手动下载"
+        )
+        expect(
             !UpdateCodeSignature.signerSupportsAutomaticInstallation(nil),
             "ad-hoc 发布包只提供手动下载，不尝试签名连续安装"
         )

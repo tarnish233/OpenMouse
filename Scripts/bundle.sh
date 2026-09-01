@@ -7,6 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+source "$ROOT/Scripts/community-signing.sh"
 CONFIG="${CONFIG:-release}"
 DISTRIBUTION="${DISTRIBUTION:-0}"
 COMMUNITY_DISTRIBUTION="${COMMUNITY_DISTRIBUTION:-0}"
@@ -74,28 +75,33 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 [ -f "$ROOT/Resources/AppIcon.icns" ] && cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# TCC remembers the Accessibility grant per (bundle id, code signature). Only a Developer ID
-# identity is both stable across releases and valid for distribution without a development
-# provisioning profile. Community releases therefore use an explicit ad-hoc signature: they
-# remain launchable after the normal Gatekeeper override, but upgrades may reset TCC grants.
+# TCC keys Accessibility/Input Monitoring grants to the bundle identifier plus the code's
+# designated requirement. Public community builds use a repository-pinned self-signed
+# certificate and an explicit requirement containing that certificate's SHA-1. Unlike ad-hoc
+# CDHash requirements, this remains identical when the executable changes between versions.
+USE_FIXED_COMMUNITY_IDENTITY=0
+IDENTITY=""
+IDENTITY_LABEL=""
+
 if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
-  IDENTITY=""
-  IDENTITY_LABEL=""
+  USE_FIXED_COMMUNITY_IDENTITY=1
 elif [ -n "${CODESIGN_IDENTITY:-}" ]; then
   IDENTITY="$CODESIGN_IDENTITY"
   IDENTITY_LABEL="$CODESIGN_IDENTITY"
 else
-  # A Developer ID identity is stable and launchable without a provisioning profile. Do not
-  # auto-select Apple Development here: revoked/expired development certificates can still be
-  # listed as usable by `find-identity`, produce a bundle that passes `codesign --verify`, and
-  # then be rejected by AMFI at launch. Distribution never enters this branch because it must
-  # name an explicit Developer ID identity.
+  # Prefer a real Developer ID when it exists. Never auto-select Apple Development: revoked or
+  # development-only certificates can produce a bundle that verifies locally but is rejected on
+  # another Mac. If Developer ID is unavailable, use the fixed community identity when installed;
+  # this also keeps Debug builds' TCC authorization stable on maintainer machines.
   IDENTITY_LINE="$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -v CSSMERR \
     | grep -E '"Developer ID Application' \
     | head -1 || true)"
   IDENTITY="$(printf '%s' "$IDENTITY_LINE" | grep -oE '[0-9A-F]{40}' | head -1 || true)"
   IDENTITY_LABEL="$(printf '%s' "$IDENTITY_LINE" | grep -oE '"[^"]*"' | tr -d '"' || true)"
+  if [ -z "$IDENTITY" ] && community_identity_available "$ROOT"; then
+    USE_FIXED_COMMUNITY_IDENTITY=1
+  fi
 fi
 
 sign_component() {
@@ -111,43 +117,38 @@ sign_component() {
   fi
 }
 
-if [ -n "$IDENTITY" ]; then
-  echo "==> codesign with: ${IDENTITY_LABEL:-$IDENTITY} [$IDENTITY]"
-  if [ "$DISTRIBUTION" = "1" ]; then
-    echo "==> distribution signing: hardened runtime + secure timestamp"
-  else
-    echo "==> local identity signing: hardened runtime"
-  fi
-else
-  # Keep the ad-hoc designated requirement tied to this exact build's CDHash. A weaker,
-  # identifier-only requirement would make TCC permissions transferable to any replacement
-  # bundle using the same identifier.
+if [ "$USE_FIXED_COMMUNITY_IDENTITY" = "1" ]; then
   if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
-    echo "==> community signing: ad-hoc + hardened runtime (manual upgrade; TCC grants may reset)"
+    echo "==> community signing: fixed self-signed identity + hardened runtime"
+  else
+    echo "==> local signing: fixed community identity (stable TCC requirement)"
+  fi
+  "$ROOT/Scripts/sign-community-app.sh" "$APP"
+else
+  if [ -n "$IDENTITY" ]; then
+    echo "==> codesign with: ${IDENTITY_LABEL:-$IDENTITY} [$IDENTITY]"
+    if [ "$DISTRIBUTION" = "1" ]; then
+      echo "==> distribution signing: hardened runtime + secure timestamp"
+    else
+      echo "==> local identity signing: hardened runtime"
+    fi
   else
     echo "==> codesign ad-hoc (Accessibility/Input Monitoring may reset for this rebuild)"
   fi
-fi
 
-echo "==> signing update helper"
-sign_component "$APP/Contents/Helpers/$UPDATER_EXECUTABLE" 2>&1 | sed 's/^/    /'
-echo "==> signing application"
-sign_component "$APP" 2>&1 | sed 's/^/    /'
+  echo "==> signing update helper"
+  sign_component "$APP/Contents/Helpers/$UPDATER_EXECUTABLE" 2>&1 | sed 's/^/    /'
+  echo "==> signing application"
+  sign_component "$APP" 2>&1 | sed 's/^/    /'
 
-codesign --verify --strict --verbose=1 "$APP/Contents/Helpers/$UPDATER_EXECUTABLE" 2>&1 | sed 's/^/    /'
-codesign --verify --strict --verbose=1 "$APP" 2>&1 | sed 's/^/    /'
-if [ "$DISTRIBUTION" = "1" ]; then
-  echo "==> validating distribution signature"
-  SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
-  printf '%s\n' "$SIGNATURE_DETAILS" | "$ROOT/Scripts/validate-distribution-signature.sh" 2>&1 \
-    | sed 's/^/    /'
-fi
-if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
-  echo "==> validating community signature"
-  SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
-  printf '%s\n' "$SIGNATURE_DETAILS" \
-    | "$ROOT/Scripts/validate-community-signature.sh" 2>&1 \
-    | sed 's/^/    /'
+  codesign --verify --strict --verbose=1 "$APP/Contents/Helpers/$UPDATER_EXECUTABLE" 2>&1 | sed 's/^/    /'
+  codesign --verify --strict --verbose=1 "$APP" 2>&1 | sed 's/^/    /'
+  if [ "$DISTRIBUTION" = "1" ]; then
+    echo "==> validating distribution signature"
+    SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
+    printf '%s\n' "$SIGNATURE_DETAILS" | "$ROOT/Scripts/validate-distribution-signature.sh" 2>&1 \
+      | sed 's/^/    /'
+  fi
 fi
 if [ "$DISTRIBUTION" = "1" ] || [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
   echo "==> smoke-testing signed release executables"

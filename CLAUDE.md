@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 332 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
+make test     # 应用自检 333 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -183,9 +183,11 @@ XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有—�
 
 ## 签名与权限
 
-TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。只有 Developer ID Application 身份既能跨版本稳定，又能在没有开发描述文件时分发运行。日常 `make app` 在没有 Developer ID 时使用 ad-hoc 签名；`make dist-community` 也明确产出 ad-hoc 社区包，所以重建或升级可能需要重新授权。彻底重来用 `make tcc-reset`。
+TCC 通过 bundle id 与 Designated Requirement 识别同一应用。`v0.4.0` 至 `v0.6.0` 的 ad-hoc Requirement 只含 CDHash，每次编译都会变化。自 `v0.6.1` 起，社区包使用固定自签名身份 `Open Mouse Community Signing`，Requirement 明确锁定 Bundle ID 与公开证书 SHA-1 `0DD76541008E2DD109E45A07942A0A2EBAC48D42`。公开证书跟踪在 `Resources/OpenMouseCommunitySigning.cer`；私钥和 `.p12` 永远不能进入 Git。彻底重置权限用 `make tcc-reset`。
 
-`make dist` 与社区发布的签名策略不同：正式发布必须显式传 `CODESIGN_IDENTITY`，使用 Developer ID Application + hardened runtime + Apple 安全时间戳；`bundle.sh` 会读回 Authority / Timestamp / runtime flags，任一不符直接失败。`make dist-community` 使用 ad-hoc + hardened runtime，并实际启动主程序和更新助手做冒烟检查，防止再把只能开发机运行的 Apple Development 构建发出去。不要为了“先出包”绕过任一签名校验。
+维护者登录钥匙串中有该证书时，日常 `make app` / `make debug` 也使用固定身份，避免每次重建测试包都重置 TCC；没有私钥的贡献者仍回落 ad-hoc。第二台发布 Mac 只能导入同一个加密 `.p12`，运行 `Scripts/import-community-signing-identity.sh /path/to/OpenMouseCommunitySigning.p12`，绝不能创建同名新证书。当前 Mac 的加密备份在 `~/Library/Application Support/OpenMouse Signing/OpenMouseCommunitySigning.p12`，密码保存在登录钥匙串服务 `Open Mouse Community Signing Backup Password`；仍需把 `.p12` 另存到安全的离线位置。
+
+`make dist` 与社区发布的签名策略不同：正式发布必须显式传 `CODESIGN_IDENTITY`，使用 Developer ID Application + hardened runtime + Apple 安全时间戳；`make dist-community` 必须找到仓库公开证书对应的固定私钥，使用 self-signed certificate + hardened runtime + 无时间戳，并同时验证 Authority、runtime flags、TeamIdentifier 和精确 Requirement。两个发布路径都实际启动主程序与更新助手做冒烟检查。不要为了“先出包”绕过任一签名校验。
 
 ## git
 

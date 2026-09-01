@@ -54,8 +54,8 @@ dist:
 	ditto -c -k --sequesterRsrc --keepParent "$(APP)" "build/OpenMouse-$(VERSION).zip"
 	@shasum -a 256 "build/OpenMouse-$(VERSION).zip"
 
-## Zip a launchable ad-hoc build when Developer ID is unavailable.
-## It is not notarized; upgrades are manual and may require re-authorizing TCC permissions.
+## Zip a launchable build signed with the repository-pinned self-signed identity.
+## It is not notarized; upgrades remain manual, but the TCC requirement stays stable.
 dist-community:
 	COMMUNITY_DISTRIBUTION=1 ./Scripts/bundle.sh
 	rm -f "build/OpenMouse-$(VERSION).zip"

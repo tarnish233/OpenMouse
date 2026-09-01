@@ -8,3 +8,8 @@ build/
 
 # macOS
 .DS_Store
+
+# Private signing material must never enter the repository
+*.p12
+*.pfx
+*.key
