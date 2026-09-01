@@ -2,7 +2,8 @@
 # Validate `codesign -dvvv` output for the stable self-signed community release.
 set -euo pipefail
 
-expected_team="${1:-}"
+expected_authority="${1:-}"
+expected_team="${2:-}"
 details="$(cat)"
 
 fail() {
@@ -10,8 +11,12 @@ fail() {
   exit 1
 }
 
-printf '%s\n' "$details" | grep -Eq '^Authority=Apple Development:' \
-  || fail "signer is not Apple Development"
+case "$expected_authority" in
+  "Apple Development:"*) ;;
+  *) fail "expected signer is not an Apple Development identity" ;;
+esac
+printf '%s\n' "$details" | grep -Fxq "Authority=$expected_authority" \
+  || fail "signer is not $expected_authority"
 printf '%s\n' "$details" | grep -Eq '(^|[[:space:]])flags=[^[:space:]]*\(runtime\)' \
   || fail "hardened runtime flag is missing"
 printf '%s\n' "$details" | grep -Eq '^Signature=adhoc$' \

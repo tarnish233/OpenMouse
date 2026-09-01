@@ -11,6 +11,7 @@ CONFIG="${CONFIG:-release}"
 DISTRIBUTION="${DISTRIBUTION:-0}"
 COMMUNITY_DISTRIBUTION="${COMMUNITY_DISTRIBUTION:-0}"
 COMMUNITY_TEAM_ID="${COMMUNITY_TEAM_ID:-LRS9XW2MVU}"
+COMMUNITY_SIGNING_AUTHORITY="${COMMUNITY_SIGNING_AUTHORITY:-Apple Development: tarnished233@gmail.com (2FG46FXYX9)}"
 APP_NAME="Open Mouse"
 EXECUTABLE="OpenMouse"
 UPDATER_EXECUTABLE="OpenMouseUpdater"
@@ -59,7 +60,7 @@ elif [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
   # the build is notarized or suitable for normal Gatekeeper distribution.
   IDENTITY_LINE="$(security find-identity -v -p codesigning 2>/dev/null \
     | grep -v CSSMERR \
-    | grep -E '"Apple Development:' \
+    | grep -F "\"$COMMUNITY_SIGNING_AUTHORITY\"" \
     | head -1 || true)"
   IDENTITY="$(printf '%s' "$IDENTITY_LINE" | grep -oE '[0-9A-F]{40}' | head -1 || true)"
   IDENTITY_LABEL="$(printf '%s' "$IDENTITY_LINE" | grep -oE '"[^"]*"' | tr -d '"' || true)"
@@ -127,7 +128,8 @@ if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
   echo "==> validating community signature"
   SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
   printf '%s\n' "$SIGNATURE_DETAILS" \
-    | "$ROOT/Scripts/validate-community-signature.sh" "$COMMUNITY_TEAM_ID" 2>&1 \
+    | "$ROOT/Scripts/validate-community-signature.sh" \
+      "$COMMUNITY_SIGNING_AUTHORITY" "$COMMUNITY_TEAM_ID" 2>&1 \
     | sed 's/^/    /'
   DESIGNATED_REQUIREMENT="$(codesign -dr - "$APP" 2>&1)"
   printf '%s\n' "$DESIGNATED_REQUIREMENT" | grep -Fq 'anchor apple generic' \
