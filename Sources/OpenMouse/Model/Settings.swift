@@ -31,12 +31,12 @@ private struct LossyDecoded<Value: Decodable>: Decodable {
 
 /// Everything that shapes how a wheel notch turns into on-screen movement.
 ///
-/// The defaults, the parameter split and the pipeline are all matched to Mos, because that
-/// is the feel most users arrive with. Concretely, per scroll event Mos computes
+/// The parameter split and the pipeline mirror Mos, while OpenMouse's defaults use a slightly
+/// faster tuning. Concretely, per scroll event the engine computes
 /// `max(|rawDelta|, minimumStep) × speed` — where `rawDelta` prefers the OS-computed *pixel*
 /// delta, so travel grows on its own when you spin the wheel fast — and then eases the
-/// result out with a per-frame fraction of `1 − √(duration ÷ 5.2) ≈ 0.085`, which is this
-/// app's `rate`, i.e. `1 − smoothness`.
+/// result out with a per-frame fraction called `rate`, i.e. `1 − smoothness`. The tuned
+/// defaults below use a 0.13 rate for a stronger initial response without extra acceleration.
 struct ScrollSettings: Codable, Equatable, Sendable {
     /// Upper bound on smoothness. Above this the glide is longer than anyone wants and the
     /// tail takes hundreds of frames to settle.
@@ -50,14 +50,14 @@ struct ScrollSettings: Codable, Equatable, Sendable {
     var reverseHorizontal = false
     /// Floor on the travel one scroll event contributes, in pixels. Anything the OS reports
     /// smaller than this is lifted up to it, which is what makes a single slow notch move a
-    /// useful distance. Mos calls this 最短步长; its default is 33.6.
-    var minimumStep: Double = 33.6
-    /// Gain applied to the (floored) raw delta. Mos calls this 速度增益; default 2.70.
+    /// useful distance. Mos calls this 最短步长; OpenMouse defaults to 35 px.
+    var minimumStep: Double = 35
+    /// Gain applied to the (floored) raw delta. Mos calls this 速度增益; OpenMouse defaults to 3×.
     /// Because the raw delta is the OS pixel delta, fast scrolling scales up by itself.
-    var speed: Double = 2.70
+    var speed: Double = 3.0
     /// 0 = snap instantly, 0.98 = very floaty. Drives the per-frame easing rate.
-    /// 0.915 is Mos's default interpolation fraction expressed on this scale.
-    var smoothness: Double = 0.915
+    /// 0.87 gives a more immediate response while retaining the Mos-style easing curve.
+    var smoothness: Double = 0.87
     /// >1 amplifies fast consecutive notches, like a physical flywheel. Mos has no
     /// time-based acceleration (it boosts on a held modifier instead), so this is off.
     var acceleration: Double = 1.0
@@ -71,7 +71,7 @@ struct ScrollSettings: Codable, Equatable, Sendable {
     /// Some apps double-handle phases, so this stays opt-in.
     var emitScrollPhases = false
 
-    /// Mos-matched feel. Also the app default.
+    /// Tuned Mos-style feel. Also the app default.
     static let `default` = ScrollSettings()
     /// Longer, floatier glide.
     static let smooth = ScrollSettings(minimumStep: 40, speed: 3.2, smoothness: 0.95)

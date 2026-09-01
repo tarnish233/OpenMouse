@@ -3,7 +3,7 @@ import Foundation
 /// Second-stage smoothing applied to the interpolator's output.
 ///
 /// Interpolation alone still starts each notch with a jump: the first frame emits
-/// `distance × rate`, which at Mos-matched settings is ~7.6 px out of nowhere. That leading
+/// `distance × rate`, which at the tuned defaults is ~13.7 px out of nowhere. That leading
 /// edge is what reads as a flick or judder at the start of every scroll. A one-pole low-pass
 /// on the output ramps it in over a handful of frames instead.
 ///

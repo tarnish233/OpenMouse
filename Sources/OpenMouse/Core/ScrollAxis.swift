@@ -64,9 +64,8 @@ struct ScrollAxis: Equatable {
     /// Map the user-facing smoothness slider onto a per-frame decay fraction.
     ///
     /// The fraction is exactly what Mos calls `durationTransition`, and the two apps run
-    /// the same recurrence (`step = remaining × rate`), so a rate matched to Mos's gives a
-    /// matched feel. Mos's default `duration` of 4.35 maps to 0.085, hence a default
-    /// smoothness of 0.915 here.
+    /// the same recurrence (`step = remaining × rate`). OpenMouse's tuned default smoothness
+    /// of 0.87 maps to a 0.13 rate, roughly equivalent to a Mos duration of 3.94.
     static func rate(forSmoothness smoothness: Double) -> Double {
         let clamped = min(max(smoothness, 0), ScrollSettings.maxSmoothness)
         return min(max(1.0 - clamped, 1.0 - ScrollSettings.maxSmoothness), 1.0)

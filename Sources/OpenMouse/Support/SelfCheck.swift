@@ -180,8 +180,8 @@ enum SelfCheck {
             debouncedSaveLeavesMainRunLoop()
             survivesJSONRoundTrip()
         }
-        group("Mos 手感对齐") {
-            matchesMosFeel()
+        group("Mos 风格滚动") {
+            usesTunedMosStyleDefaults()
             travelFloorsThenScales()
             filterRemovesLeadingJump()
             filterConvergesAndDrains()
@@ -1897,18 +1897,15 @@ enum SelfCheck {
         expect(result.value.decoded?.scroll.speed == 4.2, "后台编码保存完整偏好快照")
     }
 
-    private static func matchesMosFeel() {
+    private static func usesTunedMosStyleDefaults() {
         let defaults = ScrollSettings.default
-        expect(defaults.minimumStep == 33.6, "最短步长对齐 Mos 的 33.6")
-        expect(defaults.speed == 2.70, "速度增益对齐 Mos 的 2.70")
-
-        // Mos: 1 - sqrt(duration / 5.2), duration default 4.35.
-        let mosRate = 1 - (4.35 / 5.2).squareRoot()
+        expect(defaults.minimumStep == 35, "默认最短步长为 35 px")
+        expect(defaults.speed == 3.0, "默认速度增益为 3.00 倍")
+        expect(defaults.smoothness == 0.87, "默认平滑度为 87%")
         expectClose(
             ScrollAxis.rate(forSmoothness: defaults.smoothness),
-            mosRate,
-            "每帧插值比例对齐 Mos",
-            tolerance: 0.002
+            0.13,
+            "默认每帧插值比例为 0.13"
         )
         expect(
             ScrollSmoothingFilter.defaultCoefficient == 0.23,
@@ -1919,16 +1916,16 @@ enum SelfCheck {
     private static func travelFloorsThenScales() {
         let settings = ScrollSettings.default
         // A slow notch reports a small pixel delta, so the floor decides the distance.
-        expectClose(settings.travel(forRawDelta: 10), 33.6 * 2.70, "慢速滚动被抬到最短步长再乘增益")
-        expectClose(settings.travel(forRawDelta: -10), -33.6 * 2.70, "方向被保留")
+        expectClose(settings.travel(forRawDelta: 10), 35 * 3.0, "慢速滚动被抬到最短步长再乘增益")
+        expectClose(settings.travel(forRawDelta: -10), -35 * 3.0, "方向被保留")
         // A fast notch reports a larger delta, which scales past the floor.
-        expectClose(settings.travel(forRawDelta: 90), 90 * 2.70, "快速滚动按系统上报的像素增量放大")
+        expectClose(settings.travel(forRawDelta: 90), 90 * 3.0, "快速滚动按系统上报的像素增量放大")
         expect(settings.travel(forRawDelta: 0) == 0, "零增量不产生位移")
     }
 
     private static func filterRemovesLeadingJump() {
         var filter = ScrollSmoothingFilter()
-        let step = 7.65 // one frame of a default-settings notch
+        let step = 13.65 // one frame of a default-settings notch: 35 × 3 × 0.13
         let first = filter.filter(step)
         let second = filter.filter(step)
         let third = filter.filter(step)
