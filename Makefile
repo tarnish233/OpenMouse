@@ -46,8 +46,8 @@ dist:
 	ditto -c -k --sequesterRsrc --keepParent "$(APP)" "build/OpenMouse-$(VERSION).zip"
 	@shasum -a 256 "build/OpenMouse-$(VERSION).zip"
 
-## Zip a stable Apple Development-signed build when Developer ID is unavailable.
-## It is not notarized, so Gatekeeper still warns on first install.
+## Zip a launchable ad-hoc build when Developer ID is unavailable.
+## It is not notarized; upgrades are manual and may require re-authorizing TCC permissions.
 dist-community:
 	COMMUNITY_DISTRIBUTION=1 ./Scripts/bundle.sh
 	rm -f "build/OpenMouse-$(VERSION).zip"

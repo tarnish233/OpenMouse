@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import OpenMouseUpdateSupport
 
 /// Self-contained assertion checks for the pure logic in this app: the easing curve, the
 /// per-app rule resolution, the button bindings and preferences hygiene.
@@ -2775,6 +2776,23 @@ enum SelfCheck {
     }
 
     private static func rejectsUnexpectedReleaseURLs() {
+        expect(
+            UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                "Developer ID Application: Example (TEAM123)"
+            ),
+            "Developer ID Application 发布包可启用应用内安装"
+        )
+        expect(
+            !UpdateCodeSignature.signerSupportsAutomaticInstallation(
+                "Apple Development: Example (TEAM123)"
+            ),
+            "Apple Development 不是可分发的自动更新身份"
+        )
+        expect(
+            !UpdateCodeSignature.signerSupportsAutomaticInstallation(nil),
+            "ad-hoc 发布包只提供手动下载，不尝试签名连续安装"
+        )
+
         expect(UpdateChecker.latestReleasePageURL(repository: "owner") == nil, "缺少仓库名时拒绝构造更新地址")
         expect(UpdateChecker.latestReleasePageURL(repository: "owner/repo/extra") == nil, "多余路径段不会进入更新地址")
         guard let otherHost = URL(string: "https://example.com/owner/repo/releases/tag/v1.0.0"),

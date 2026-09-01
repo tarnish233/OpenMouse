@@ -263,10 +263,15 @@ private struct UpdateSection: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
                 if let release = updates.pendingRelease {
-                    Button(Strings.updateInstallRetry) {
-                        Task { await updates.install(release) }
+                    if updates.canInstallAutomatically {
+                        Button(Strings.updateInstallRetry) {
+                            Task { await updates.install(release) }
+                        }
+                        .controlSize(.small)
+                    } else {
+                        Button(Strings.updateDownloadManually) { updates.open(release) }
+                            .controlSize(.small)
                     }
-                    .controlSize(.small)
                 }
             }
         case .idle:
@@ -299,13 +304,19 @@ private struct UpdateSection: View {
                         .font(.headline)
                         .foregroundStyle(.tint)
                     HStack(spacing: 8) {
-                        Button(Strings.updateInstall) {
-                            Task { await updates.install(release) }
+                        if updates.canInstallAutomatically {
+                            Button(Strings.updateInstall) {
+                                Task { await updates.install(release) }
+                            }
+                                .controlSize(.small)
+                                .buttonStyle(.borderedProminent)
+                            Button(Strings.updateOpen) { updates.open(release) }
+                                .controlSize(.small)
+                        } else {
+                            Button(Strings.updateDownloadManually) { updates.open(release) }
+                                .controlSize(.small)
+                                .buttonStyle(.borderedProminent)
                         }
-                            .controlSize(.small)
-                            .buttonStyle(.borderedProminent)
-                        Button(Strings.updateOpen) { updates.open(release) }
-                            .controlSize(.small)
                         Button(Strings.updateSkip) { updates.skip(release) }
                             .controlSize(.small)
                     }

@@ -20,6 +20,8 @@ macOS 菜单栏小工具，做三件事：
 2. **授予辅助功能权限** —— 系统设置 › 隐私与安全性 › 辅助功能 → 打开 Open Mouse。授权后一秒内自动接管，不用重启应用。
 3. **Logitech HID++ 设备还需输入监控** —— 系统设置 › 隐私与安全性 › 输入监控 → 打开 Open Mouse，才能可靠读取 Bolt / Unifying / 蓝牙直连设备的物理按住与抬起。
 
+当前 GitHub 二进制是未公证的 ad-hoc 社区发布包。升级时需要手动下载并替换应用，macOS 也可能要求重新授予辅助功能 / 输入监控权限。
+
 配置存在 `~/Library/Application Support/OpenMouse/preferences.json`，是给人看的 JSON，可以直接编辑。
 
 ## 滚动
@@ -70,7 +72,7 @@ macOS 菜单栏小工具，做三件事：
 - **应用例外**：为指定应用完全不干预，或使用独立的滚动参数；菜单栏可一键为最前面的应用停用
 - **冲突检测**：同类软件在运行时直接点名
 - **实时诊断**：拦截了多少、合成了多少、帧源是 vsync 还是定时器兜底、事件投给了哪个进程
-- **应用内更新**：直接读取 GitHub Releases（不使用限流 API），后台下载并验证同一发布签名后替换应用、自动重启
+- **更新检查**：直接读取 GitHub Releases（不使用限流 API）；Developer ID 发布包可验证同一签名后自动安装，社区发布包跳转发布页手动下载
 - **登录时启动**
 - 空闲时零开销：没有滚动时帧源会销毁，事件掩码只订阅当前配置真正需要的事件
 
@@ -84,10 +86,10 @@ make run        # 上面这些，然后启动
 make install    # 拷到 /Applications 并启动（登录项注册需要装在这里）
 make test       # 跑全部内置自检
 make dist       # Developer ID 发布包（需要显式传入证书）
-make dist-community # 无 Developer ID 时，用现有 Apple Development 身份打包未公证版本
+make dist-community # 无 Developer ID 时，打包可启动的 ad-hoc 未公证版本
 ```
 
-`v0.3.0` 是从旧 ad-hoc 签名迁移到固定发布身份的版本，因此从 `v0.2.x` 升级时仍需手动替换应用，并重新授予最后一次辅助功能 / 输入监控权限。之后只要发布继续使用同一个签名身份，应用内更新就会保留授权。若主动更换签名身份，或者系统设置里的授权条目变成勾了也不生效的幽灵项，用 `make tcc-reset` 清掉重来。
+`v0.3.0` 使用了 Apple Development 签名：主应用经“仍要打开”后可以运行，但独立更新助手仍会被 macOS 拒绝启动，因此不能完成应用内安装。`v0.4.0` 恢复为 ad-hoc 社区发布包，升级必须手动替换，并可能需要重新授予辅助功能 / 输入监控权限。只有使用 `make dist` 生成的 Developer ID 发布包才启用同签名应用内安装。若授权条目变成勾了也不生效的幽灵项，用 `make tcc-reset` 清掉重来。
 
 命令行开关：
 
@@ -95,7 +97,7 @@ make dist-community # 无 Developer ID 时，用现有 Apple Development 身份�
 OpenMouse --self-check     # 跑内置自检并退出，返回码即结果
 OpenMouse --verbose        # 把事件管线计数实时打到 stderr
 OpenMouse --tab buttons    # 启动即打开指定设置页（scroll/buttons/apps/general）
-OpenMouseUpdater --validate-signature old.app new.app # 验证两个发布包身份连续
+OpenMouseUpdater --validate-signature old.app new.app # 验证两个 Developer ID 发布包身份连续
 ```
 
 排查「到底有没有在工作」最快的手段是 `--verbose`：`smoothed` 是被吞掉的滚轮格数，`synthesized` 是合成出去的事件数，后者显著大于前者说明插值在跑。`frameSource=timer` 表示没锁上 vsync，那滚动会带轻微抖动。

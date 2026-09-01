@@ -181,9 +181,9 @@ XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有—�
 
 ## 签名与权限
 
-TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。`Scripts/bundle.sh` 按证书**哈希**而不是名字挑证书（钥匙串里常有多张同名证书，用名字会让 `codesign` 报 ambiguous）。固定签名身份时授权能扛过反复重新构建，但**刚重新签名后的第一次启动**可能短暂读不到授权——下次启动就恢复。所以不要在构建已是最新时重新签名。彻底重来用 `make tcc-reset`。
+TCC 记录辅助功能授权时同时看 bundle id、签名身份和 cdhash。只有 Developer ID Application 身份既能跨版本稳定，又能在没有开发描述文件时分发运行。日常 `make app` 在没有 Developer ID 时使用 ad-hoc 签名；`make dist-community` 也明确产出 ad-hoc 社区包，所以重建或升级可能需要重新授权。彻底重来用 `make tcc-reset`。
 
-`make dist` 与日常 `make app` 的签名策略不同：发布必须显式传 `CODESIGN_IDENTITY`，使用 Developer ID Application + hardened runtime + Apple 安全时间戳；`bundle.sh` 会读回 Authority / Timestamp / runtime flags，任一不符直接失败。不要为了“先出包”绕过 `validate-distribution-signature.sh`。
+`make dist` 与社区发布的签名策略不同：正式发布必须显式传 `CODESIGN_IDENTITY`，使用 Developer ID Application + hardened runtime + Apple 安全时间戳；`bundle.sh` 会读回 Authority / Timestamp / runtime flags，任一不符直接失败。`make dist-community` 使用 ad-hoc + hardened runtime，并实际启动主程序和更新助手做冒烟检查，防止再把只能开发机运行的 Apple Development 构建发出去。不要为了“先出包”绕过任一签名校验。
 
 ## git
 

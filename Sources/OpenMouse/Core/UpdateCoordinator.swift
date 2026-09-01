@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Observation
+import OpenMouseUpdateSupport
 
 /// Pure scheduling/presentation rules shared by the coordinator and self-checks.
 enum UpdatePolicy {
@@ -52,6 +53,7 @@ final class UpdateCoordinator {
     private(set) var isChecking = false
     private(set) var lastCheckedAt: Date?
     private(set) var installationState: InstallationState = .idle
+    let canInstallAutomatically: Bool
 
     private var store: SettingsStore { SettingsStore.shared }
     private var automaticTimer: Timer?
@@ -60,7 +62,11 @@ final class UpdateCoordinator {
     private var didStartAutomaticScheduling = false
     private var retryNotBefore: Date?
 
-    private init() {}
+    private init() {
+        canInstallAutomatically = UpdateCodeSignature.supportsAutomaticInstallation(
+            at: Bundle.main.bundleURL
+        )
+    }
 
     /// The release the user should be told about: newer, and not one they chose to skip.
     var pendingRelease: UpdateChecker.Release? {

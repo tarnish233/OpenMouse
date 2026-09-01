@@ -10,8 +10,6 @@ ROOT="$PWD"
 CONFIG="${CONFIG:-release}"
 DISTRIBUTION="${DISTRIBUTION:-0}"
 COMMUNITY_DISTRIBUTION="${COMMUNITY_DISTRIBUTION:-0}"
-COMMUNITY_TEAM_ID="${COMMUNITY_TEAM_ID:-LRS9XW2MVU}"
-COMMUNITY_SIGNING_AUTHORITY="${COMMUNITY_SIGNING_AUTHORITY:-Apple Development: tarnished233@gmail.com (2FG46FXYX9)}"
 APP_NAME="Open Mouse"
 EXECUTABLE="OpenMouse"
 UPDATER_EXECUTABLE="OpenMouseUpdater"
@@ -40,8 +38,8 @@ echo "==> assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
 
-# The icon is generated from vector drawing code and intentionally ignored by Git. Rebuild it
-# on a fresh checkout, and whenever the drawing source is newer than the last generated asset.
+# The icon and its vector drawing source are both tracked. Rebuild the asset if it is missing
+# or the drawing source is newer, so a fresh source-only checkout remains reproducible.
 if [ ! -f "$ROOT/Resources/AppIcon.icns" ] \
   || [ "$ROOT/Scripts/make_icon.swift" -nt "$ROOT/Resources/AppIcon.icns" ]; then
   echo "==> generating AppIcon.icns"
@@ -57,26 +55,16 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 [ -f "$ROOT/Resources/AppIcon.icns" ] && cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# TCC remembers the Accessibility grant per (bundle id, code signature). Signing with a
-# stable identity means the permission survives every rebuild; ad-hoc signatures change
-# on each build and macOS then silently drops the grant.
-if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+# TCC remembers the Accessibility grant per (bundle id, code signature). Only a Developer ID
+# identity is both stable across releases and valid for distribution without a development
+# provisioning profile. Community releases therefore use an explicit ad-hoc signature: they
+# remain launchable after the normal Gatekeeper override, but upgrades may reset TCC grants.
+if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
+  IDENTITY=""
+  IDENTITY_LABEL=""
+elif [ -n "${CODESIGN_IDENTITY:-}" ]; then
   IDENTITY="$CODESIGN_IDENTITY"
   IDENTITY_LABEL="$CODESIGN_IDENTITY"
-elif [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
-  # Apple Development is intentionally allowed only in the explicit community release mode.
-  # It gives all releases a stable Apple-backed designated requirement without pretending that
-  # the build is notarized or suitable for normal Gatekeeper distribution.
-  IDENTITY_LINE="$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep -v CSSMERR \
-    | grep -F "\"$COMMUNITY_SIGNING_AUTHORITY\"" \
-    | head -1 || true)"
-  IDENTITY="$(printf '%s' "$IDENTITY_LINE" | grep -oE '[0-9A-F]{40}' | head -1 || true)"
-  IDENTITY_LABEL="$(printf '%s' "$IDENTITY_LINE" | grep -oE '"[^"]*"' | tr -d '"' || true)"
-  if [ -z "$IDENTITY" ]; then
-    echo "error: make dist-community requires a valid Apple Development identity" >&2
-    exit 1
-  fi
 else
   # A Developer ID identity is stable and launchable without a provisioning profile. Do not
   # auto-select Apple Development here: revoked/expired development certificates can still be
@@ -108,16 +96,18 @@ if [ -n "$IDENTITY" ]; then
   echo "==> codesign with: ${IDENTITY_LABEL:-$IDENTITY} [$IDENTITY]"
   if [ "$DISTRIBUTION" = "1" ]; then
     echo "==> distribution signing: hardened runtime + secure timestamp"
-  elif [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
-    echo "==> community signing: Apple Development identity + hardened runtime (not notarized)"
   else
     echo "==> local identity signing: hardened runtime"
   fi
 else
   # Keep the ad-hoc designated requirement tied to this exact build's CDHash. A weaker,
   # identifier-only requirement would make TCC permissions transferable to any replacement
-  # bundle using the same identifier. Debug rebuilds therefore require explicit re-authorization.
-  echo "==> codesign ad-hoc (Accessibility/Input Monitoring may reset for this rebuild)"
+  # bundle using the same identifier.
+  if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
+    echo "==> community signing: ad-hoc + hardened runtime (manual upgrade; TCC grants may reset)"
+  else
+    echo "==> codesign ad-hoc (Accessibility/Input Monitoring may reset for this rebuild)"
+  fi
 fi
 
 echo "==> signing update helper"
@@ -137,14 +127,12 @@ if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
   echo "==> validating community signature"
   SIGNATURE_DETAILS="$(codesign -dvvv "$APP" 2>&1)"
   printf '%s\n' "$SIGNATURE_DETAILS" \
-    | "$ROOT/Scripts/validate-community-signature.sh" \
-      "$COMMUNITY_SIGNING_AUTHORITY" "$COMMUNITY_TEAM_ID" 2>&1 \
+    | "$ROOT/Scripts/validate-community-signature.sh" 2>&1 \
     | sed 's/^/    /'
-  DESIGNATED_REQUIREMENT="$(codesign -dr - "$APP" 2>&1)"
-  printf '%s\n' "$DESIGNATED_REQUIREMENT" | grep -Fq 'anchor apple generic' \
-    || { echo "error: community designated requirement is not Apple-anchored" >&2; exit 1; }
-  printf '%s\n' "$DESIGNATED_REQUIREMENT" | grep -Fq 'certificate leaf[subject.CN] = "Apple Development:' \
-    || { echo "error: community designated requirement is not bound to the development identity" >&2; exit 1; }
-  printf '%s\n' "$DESIGNATED_REQUIREMENT" | sed 's/^/    /'
+fi
+if [ "$DISTRIBUTION" = "1" ] || [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
+  echo "==> smoke-testing signed release executables"
+  "$APP/Contents/MacOS/$EXECUTABLE" --self-check >/dev/null
+  "$APP/Contents/Helpers/$UPDATER_EXECUTABLE" --self-check >/dev/null
 fi
 echo "==> done: $APP"

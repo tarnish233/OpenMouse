@@ -30,6 +30,34 @@ public enum UpdateCodeSignature {
         }
     }
 
+    /// Automatic replacement is offered only for Developer ID Application builds.
+    /// Apple Development requires a device-bound provisioning profile, while ad-hoc signatures
+    /// intentionally change their designated requirement on every build.
+    public static func supportsAutomaticInstallation(at applicationURL: URL) -> Bool {
+        var code: SecStaticCode?
+        var status = SecStaticCodeCreateWithPath(applicationURL as CFURL, [], &code)
+        guard status == errSecSuccess, let code else { return false }
+
+        let validityFlags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate)
+        status = SecStaticCodeCheckValidity(code, validityFlags, nil)
+        guard status == errSecSuccess else { return false }
+
+        var information: CFDictionary?
+        status = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information)
+        guard status == errSecSuccess,
+              let values = information as? [CFString: Any],
+              let certificates = values[kSecCodeInfoCertificates] as? [SecCertificate],
+              let leaf = certificates.first else { return false }
+
+        var commonName: CFString?
+        guard SecCertificateCopyCommonName(leaf, &commonName) == errSecSuccess else { return false }
+        return signerSupportsAutomaticInstallation(commonName as String?)
+    }
+
+    public static func signerSupportsAutomaticInstallation(_ commonName: String?) -> Bool {
+        commonName?.hasPrefix("Developer ID Application:") == true
+    }
+
     public static func validate(candidateURL: URL, matchesCurrentAppAt currentURL: URL) throws {
         var currentCode: SecStaticCode?
         var status = SecStaticCodeCreateWithPath(currentURL as CFURL, [], &currentCode)
