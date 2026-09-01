@@ -29,6 +29,8 @@ final class MouseEngine {
 
     private(set) var capturedPress: CapturedPress?
     private(set) var isCapturingButton = false
+    /// The current hardware DPI reported by a connected Logitech HID++ mouse.
+    private(set) var currentLogitechDPI: Int?
 
     /// Nil only in self-checks, where touching the singleton would create a real preferences
     /// file and subscribe to workspace notifications.
@@ -75,6 +77,13 @@ final class MouseEngine {
                 router.updateHIDPPOwnedButtons(buttons)
             }
         )
+        router.setHardwareActionHandler { [weak hidpp] action in
+            guard case let .toggleDPI(levels) = action else { return false }
+            DispatchQueue.main.async { [weak hidpp] in
+                hidpp?.toggleDPI(levels)
+            }
+            return true
+        }
         self.init(
             store: store,
             router: router,
@@ -84,6 +93,9 @@ final class MouseEngine {
             scrollComparison: scrollComparison,
             isTrusted: { AccessibilityPermission.isTrusted }
         )
+        hidpp.setDPIHandler { [weak self] dpi in
+            self?.currentLogitechDPI = dpi
+        }
     }
 
     /// Internal seam for lifecycle self-checks. Production always enters through `shared`.
@@ -202,7 +214,11 @@ final class MouseEngine {
     private func reconcileHIDPP(preferences: Preferences) {
         guard let hidpp else { return }
         hidpp.start()
-        let buttons = Set(preferences.buttons.filter(\.isActive).map(\.button))
+        let configured = Set(preferences.buttons.filter(\.isActive).map(\.button))
+        let buttons = LogitechHIDPPProtocol.desiredButtons(
+            configured: configured,
+            capturing: isCapturingButton
+        )
         hidpp.updateDesiredButtons(buttons)
     }
 
@@ -272,6 +288,10 @@ final class MouseEngine {
     }
 
     // MARK: Button learning
+
+    func refreshLogitechDPI() {
+        hidpp?.refreshDPI()
+    }
 
     func beginButtonCapture() {
         guard !isCapturingButton else { return }

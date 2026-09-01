@@ -236,6 +236,7 @@ enum MouseAction: Codable, Equatable, Hashable, Sendable {
     case forceQuit
     case logout
     case invertColors
+    case toggleDPI(LogitechDPILevels)
     case keyStroke(KeyCombo)
     case launchApp(path: String)
     /// Hold this button and flick a direction to navigate: up = Mission Control,
@@ -263,6 +264,15 @@ enum MouseAction: Codable, Equatable, Hashable, Sendable {
         }
 
         switch kind {
+        case .toggleDPI:
+            let payload = try? container.nestedContainer(
+                keyedBy: PayloadCodingKeys.self,
+                forKey: actionKey
+            )
+            self = .toggleDPI(
+                (try? payload?.decode(LogitechDPILevels.self, forKey: ._0)) ?? .default
+            )
+
         case .keyStroke:
             guard let payload = try? container.nestedContainer(
                 keyedBy: PayloadCodingKeys.self,
@@ -285,7 +295,7 @@ enum MouseAction: Codable, Equatable, Hashable, Sendable {
 
         default:
             // ActionKind is already the single exhaustive, payload-free representation used
-            // by the picker. Reusing it here avoids a second 62-case decoder table drifting.
+            // by the picker. Reusing it here avoids a second large decoder table drifting.
             self = kind.makeAction(preserving: .passthrough)
         }
     }

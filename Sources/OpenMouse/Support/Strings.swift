@@ -110,12 +110,19 @@ enum Strings {
         case 2: return "中键"
         case 3: return "侧键 4"
         case 4: return "侧键 5"
+        case LogitechHIDPPProtocol.dpiSwitchButton: return "DPI 键"
         default: return "按键 \(number + 1)"
         }
     }
     static let buttonRecordShortcut = "未设置（点击录制）"
     static let buttonRecording = "请按下快捷键…"
     static let buttonChooseApp = "选择应用…"
+    static func dpiValue(_ value: Int) -> String { "\(value) DPI" }
+    static func dpiCurrentValue(_ value: Int) -> String { "当前 \(value) DPI" }
+    static func dpiCurrentHelp(_ value: Int) -> String { "当前鼠标正在使用 \(value) DPI" }
+    static let dpiChangeHelp = "点击修改 DPI"
+    static let dpiCurrentAccessibilityValue = "当前使用"
+    static let dpiInactiveAccessibilityValue = "未使用"
 
     // Recorder sheet
     static let recorderTitle = "录入鼠标按键"

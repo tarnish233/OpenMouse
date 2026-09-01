@@ -44,10 +44,11 @@ macOS 菜单栏小工具，做三件事：
 
 不预设按键列表 —— 不同鼠标能报出的按键并不一样。**按下你想用的键，它才出现在列表里**，然后为它选择动作。录入时可以同时按住修饰键，给同一个物理键配出不同组合：侧键 4 = 后退，⌘ + 侧键 4 = 调度中心。
 
-共 64 个动作，按类别收进二级菜单：
+共 65 个动作，按类别收进二级菜单：
 
 | 类别 | 动作 |
 |---|---|
+| 鼠标 | 切换 DPI（两个可配置的硬件档位，默认 1000 ↔ 1600 DPI；当前硬件档位会高亮） |
 | 窗口与桌面 | 调度中心、应用程序窗口、显示桌面、左右切换桌面、循环切换窗口、启动台、显示 / 隐藏 Dock、切换应用（⌘⇥）与反向、最小化、隐藏当前 / 其他应用、关闭全部窗口、退出当前应用 |
 | 浏览与编辑 | 后退 / 前进、新建 / 关闭标签页、上一个 / 下一个标签页、复制 / 粘贴 / 剪切、撤销 / 重做、全选、查找、放大 / 缩小 |
 | 文件 | 新建 Finder 窗口、新建文件夹、移到废纸篓、清倒废纸篓、复制文件、显示简介、前往文件夹、图标 / 列表 / 分栏 / 画廊显示 |
@@ -81,8 +82,10 @@ macOS 菜单栏小工具，做三件事：
 只需要 **Xcode Command Line Tools**（`xcode-select --install`），不需要完整 Xcode。
 
 ```bash
-make app        # 编译 + 组装 .app + 签名 → build/Open Mouse.app
-make run        # 上面这些，然后启动
+make app        # 编译 + 组装正式名称的 .app → build/Open Mouse.app
+make debug      # 独立测试包 → build/Open Mouse Debug.app
+make debug-run  # 构建并启动独立测试包（单独的 Bundle ID、权限和配置）
+make run        # 构建并启动正式名称的本地包
 make install    # 拷到 /Applications 并启动（登录项注册需要装在这里）
 make test       # 跑全部内置自检
 make dist       # Developer ID 发布包（需要显式传入证书）
@@ -104,8 +107,8 @@ OpenMouseUpdater --validate-signature old.app new.app # 验证两个 Developer I
 
 ## 已知限制
 
-- **HID++ 当前聚焦可编程按钮** —— 已支持 Bolt / Unifying / 蓝牙直连设备的按钮识别与物理按住状态；SmartShift、硬件 DPI 档位和高分辨率滚轮开关尚未实现
-- **未做指针加速与 DPI 调节**（LinearMouse 覆盖这块）
+- **HID++ 当前聚焦可编程按钮与 M750 DPI 切换** —— 已支持 Bolt / Unifying / 蓝牙直连设备的按钮识别与物理按住状态；M750 系列的 DPI 键可以录入，并在两个可配置的硬件 DPI 档位之间切换。SmartShift 和高分辨率滚轮开关尚未实现
+- **未做指针加速**（LinearMouse 覆盖这块）
 - 界面目前只有中文文案，都在 `Strings.swift` 里
 - 没有做 Apple 公证
 - Mos 的「聚焦」（键码 177）与「听写」（176）在 macOS 26.6 上实测已失效，故未收入

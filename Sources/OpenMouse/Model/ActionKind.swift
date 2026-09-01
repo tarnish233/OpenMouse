@@ -65,6 +65,7 @@ enum ActionKind: String, CaseIterable, Identifiable {
     case forceQuit
     case logout
     case invertColors
+    case toggleDPI
     case keyStroke
     case launchApp
 
@@ -134,6 +135,7 @@ enum ActionKind: String, CaseIterable, Identifiable {
         case .forceQuit: "强制退出窗口"
         case .logout: "退出登录"
         case .invertColors: "反转颜色"
+        case .toggleDPI: "切换 DPI"
         case .keyStroke: "自定义快捷键"
         case .launchApp: "打开应用"
         }
@@ -147,6 +149,7 @@ enum ActionKind: String, CaseIterable, Identifiable {
 
     /// Ordered groups for the menu picker.
     static let groups: [(String, [ActionKind])] = [
+        ("鼠标", [.toggleDPI]),
         ("窗口与桌面", [.gestureNavigation, .missionControl, .applicationWindows, .showDesktop,
                    .spaceLeft, .spaceRight, .cycleWindows, .appBrowser, .toggleDock,
                    .switchApp, .switchAppReverse, .minimizeWindow, .hideApplication, .hideOthers, .closeAllWindows, .quitApp]),
@@ -224,6 +227,7 @@ enum ActionKind: String, CaseIterable, Identifiable {
         case .forceQuit: self = .forceQuit
         case .logout: self = .logout
         case .invertColors: self = .invertColors
+        case .toggleDPI: self = .toggleDPI
         case .keyStroke: self = .keyStroke
         case .launchApp: self = .launchApp
         }
@@ -295,6 +299,8 @@ enum ActionKind: String, CaseIterable, Identifiable {
         case .forceQuit: .forceQuit
         case .logout: .logout
         case .invertColors: .invertColors
+        case .toggleDPI:
+            if case .toggleDPI = current { current } else { .toggleDPI(.default) }
         case .keyStroke:
             if case .keyStroke = current { current } else { .keyStroke(.unset) }
         case .launchApp:

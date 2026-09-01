@@ -11,11 +11,12 @@ SwiftPM 构建（**没有 Xcode 工程**），单一可执行 target，AppKit �
 ## 命令
 
 ```bash
-make app      # swift build -c release + 组装 .app + 签名 → build/Open Mouse.app
-make run      # 上面这些，然后 pkill 旧进程并启动
+make app      # swift build -c release + 组装正式名称的 .app → build/Open Mouse.app
+make debug    # 独立测试包 → build/Open Mouse Debug.app
+make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
+make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make debug    # debug 配置的 .app
-make test     # 应用自检 312 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
+make test     # 应用自检 332 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -158,6 +159,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 - 跨线程共享状态统一走 `Locked`（`OSAllocatedUnfairLock`）：配置快照、动画状态、滤波器、计数器。
 - 界面文案全部集中在 `Strings.swift`，目前只有中文。
 - 设置界面遵循 `macos-settings-ui` skill 的写法（`NSWindowController` + `.fullSizeContentView` + 透明 `Form`）。
+- 本地 UI / 硬件测试只能启动 `Open Mouse Debug.app`（`com.openmouse.OpenMouse.debug`），其配置目录为 `OpenMouse Debug`；不要再用 `open -n` 启动多个正式名称实例。
 - 应用级 `.custom` 规则必须能编辑 `ScrollSettings` 的全部存储字段；`AppRuleScrollField` 与编码键的自检负责在模型扩字段时阻止 UI 静默漏项。
 - 状态栏图标同时由总开关和 `MouseEngine.status` 决定，必须通过 Observation 持续订阅两者；只在菜单动作里手动刷新会漏掉启动、权限变化和 tap 失败/恢复。
 - 权限授予没有系统通知，只能在被阻塞时轮询（1 秒一次），拿到就启动并停止轮询；任何离开运行态的分支都通过同一个 teardown 同时停止主 tap、motion tap、会话与轮询。
@@ -169,7 +171,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 
 XCTest 和 swift-testing 都随 Xcode 提供，Command Line Tools 里没有——只装 CLT 的机器连测试 target 都编译不出来。所以断言放在 app target 内，任何能构建的机器都能跑，对已发布的构建也是可用的诊断。装了完整 Xcode 之后搬进 `@Test` 是机械改写。
 
-自检里「Mos 风格滚动」那组把调优后的默认值 `35`、`3.00`、`0.87` 以及 Mos 风格滤波系数 `0.23` 钉住了，参数被误改立刻失败。「动作实现完整性」那组保证 64 个动作都有实现，并在 `.character` 经过当前布局解析成真实键码之后检查重复，能抓到多个动作塌到同一个键上的问题。
+自检里「Mos 风格滚动」那组把调优后的默认值 `35`、`3.00`、`0.87` 以及 Mos 风格滤波系数 `0.23` 钉住了，参数被误改立刻失败。「动作实现完整性」那组保证 65 个动作都有实现，并在 `.character` 经过当前布局解析成真实键码之后检查重复，能抓到多个动作塌到同一个键上的问题。
 
 **修 bug 之后要补一条断言，别让同一个 bug 回来第二次。** 但**不要以为约束已经都被钉住了**：约束 1 / 2 / 3 / 4 / 5 / 6 / 8 / 11 / 13 有断言，约束 **7 / 9 / 12 零覆盖**；约束 10 已覆盖两种系统禁用原因及统一会话拆除，约束 14 是流程约束、本质上无法断言。「滚动帧源生命周期」那组会驱动真实的 `DisplayLinkTicker`，但只钉生命周期一致性——**选哪块屏幕**（约束 9 本身）仍然没有断言，也刻意不断言「帧真的会来」，那要依赖有显示器，红在 SSH 上比没有这条更糟。
 

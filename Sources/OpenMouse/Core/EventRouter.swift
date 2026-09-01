@@ -29,6 +29,9 @@ final class EventRouter {
     /// When set, button presses are reported here (with the modifiers held) and swallowed
     /// instead of being acted on, so the settings UI can record a binding from a real press.
     private let captureHandler = Locked<((Int, UInt64) -> Void)?>(nil)
+    /// Device-specific actions such as writing Logitech hardware DPI are performed by the
+    /// owning engine rather than ActionRunner, which only synthesizes macOS input events.
+    private let hardwareActionHandler = Locked<((MouseAction) -> Bool)?>(nil)
     /// Buttons whose native CGEvent stream has been replaced by HID++ physical-state reports.
     /// Native events for these controls are swallowed to avoid a momentary down/up racing the
     /// real HID++ hold lifecycle.
@@ -98,6 +101,10 @@ final class EventRouter {
 
     func setCaptureHandler(_ handler: ((Int, UInt64) -> Void)?) {
         captureHandler.value = handler
+    }
+
+    func setHardwareActionHandler(_ handler: ((MouseAction) -> Bool)?) {
+        hardwareActionHandler.value = handler
     }
 
     func updateBindings(_ list: [ButtonBinding]) {
@@ -511,7 +518,9 @@ final class EventRouter {
             if wasIdle { onGestureActivityChanged?(true) }
         } else {
             stats.withValue { $0.buttonActionsFired += 1 }
-            runAction(action)
+            if hardwareActionHandler.value?(action) != true {
+                runAction(action)
+            }
         }
         return true
     }

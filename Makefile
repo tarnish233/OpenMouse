@@ -1,9 +1,11 @@
 APP_NAME := Open Mouse
 VERSION := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
 APP := build/$(APP_NAME).app
+DEBUG_APP_NAME := Open Mouse Debug
+DEBUG_APP := build/$(DEBUG_APP_NAME).app
 INSTALL_DIR := /Applications
 
-.PHONY: all build app run install reinstall debug test dist dist-community clean tcc-reset
+.PHONY: all build app run debug debug-run install reinstall test dist dist-community clean tcc-reset tcc-reset-debug
 
 all: app
 
@@ -15,9 +17,15 @@ build:
 app:
 	./Scripts/bundle.sh
 
-## Debug build of the bundle
+## Debug build with an isolated name, bundle id, TCC grant, and preferences directory
 debug:
-	CONFIG=debug ./Scripts/bundle.sh
+	CONFIG=debug DEBUG_VARIANT=1 ./Scripts/bundle.sh
+
+## Relaunch only the isolated debug app
+debug-run: debug
+	-pkill -x OpenMouseDebug || true
+	@while pgrep -x OpenMouseDebug >/dev/null; do sleep 0.1; done
+	open "$(DEBUG_APP)" $(if $(strip $(DEBUG_ARGS)),--args $(DEBUG_ARGS),)
 
 ## Relaunch the app from the build directory
 run: app
@@ -61,3 +69,7 @@ clean:
 ## Forget the Accessibility grant, e.g. after changing the signing identity
 tcc-reset:
 	tccutil reset Accessibility com.openmouse.OpenMouse
+
+## Forget only the isolated debug build's Accessibility grant
+tcc-reset-debug:
+	tccutil reset Accessibility com.openmouse.OpenMouse.debug

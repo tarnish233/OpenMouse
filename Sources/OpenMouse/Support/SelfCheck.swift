@@ -136,9 +136,12 @@ enum SelfCheck {
             inactiveDetection()
             motionMaskCoversPlainMovement()
             buttonReleaseUsesPressClaim()
+            routesHardwareActions()
         }
         group("Logi HID++") {
             hidppEncodesDivertWithoutRemapping()
+            hidppIncludesDpiSwitchDuringCapture()
+            hidppEncodesDPIAndChoosesOtherLevel()
             hidppDecodesPhysicalHoldSet()
             hidppHoldOutlivesMomentaryNativeMouseUp()
         }
@@ -160,6 +163,7 @@ enum SelfCheck {
         group("动作选择器") {
             actionKindRoundTrip()
             preservesShortcutPayload()
+            preservesDPILevelsPayload()
             unsetShortcutIsInertAndVisible()
             groupsAreComplete()
         }
@@ -173,6 +177,7 @@ enum SelfCheck {
             applicationMenuProvidesStandardShortcuts()
             settingsWindowWaitsForActivationBeforeOrderingFront()
             versionFallbackIsHonest()
+            debugPreferencesAreIsolated()
             statusItemPresentationTracksRuntimeState()
         }
         group("偏好设置") {
@@ -968,6 +973,42 @@ enum SelfCheck {
         expect(fired == [.missionControl], "静止手势仍按按下时动作解释为单击")
     }
 
+    private static func routesHardwareActions() {
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var hardwareActions: [MouseAction] = []
+        var ordinaryActions: [MouseAction] = []
+        let router = EventRouter(config: snapshot, runAction: { ordinaryActions.append($0) })
+        let action = MouseAction.toggleDPI(.default)
+        router.setHardwareActionHandler { received in
+            guard case .toggleDPI = received else { return false }
+            hardwareActions.append(received)
+            return true
+        }
+        router.updateBindings([
+            ButtonBinding(button: LogitechHIDPPProtocol.dpiSwitchButton, action: action)
+        ])
+
+        guard let down = mouseButtonEvent(
+            type: .otherMouseDown,
+            button: LogitechHIDPPProtocol.dpiSwitchButton,
+            modifiers: 0,
+            location: .zero
+        ), let up = mouseButtonEvent(
+            type: .otherMouseUp,
+            button: LogitechHIDPPProtocol.dpiSwitchButton,
+            modifiers: 0,
+            location: .zero
+        ) else {
+            expect(false, "可构造 DPI 键按下与抬起事件")
+            return
+        }
+
+        _ = router.handleButton(type: .otherMouseDown, event: down)
+        _ = router.handleButton(type: .otherMouseUp, event: up)
+        expect(hardwareActions == [action], "切换 DPI 动作被交给硬件处理器一次")
+        expect(ordinaryActions.isEmpty, "硬件动作不会同时落入系统按键合成路径")
+    }
+
     private static func hidppEncodesDivertWithoutRemapping() {
         expect(
             LogitechHIDPPProtocol.reportingParameters(cid: 0x0056, divert: true)
@@ -978,6 +1019,61 @@ enum SelfCheck {
             LogitechHIDPPProtocol.reportingParameters(cid: 0x0056, divert: false)
                 == [0x00, 0x56, 0x02, 0x00, 0x00],
             "解除接管时保留 valid 位并清除 divert 值"
+        )
+    }
+
+    private static func hidppIncludesDpiSwitchDuringCapture() {
+        expect(
+            LogitechHIDPPProtocol.cidToButton[0x00FD]
+                == LogitechHIDPPProtocol.dpiSwitchButton,
+            "M750 L 的 DPI Switch CID 被识别为独立 DPI 键"
+        )
+        expect(
+            LogitechHIDPPProtocol.desiredButtons(configured: [4], capturing: true)
+                == [4, LogitechHIDPPProtocol.dpiSwitchButton],
+            "录入期间临时接管不产生原生 CGEvent 的 DPI 键"
+        )
+        expect(
+            LogitechHIDPPProtocol.desiredButtons(configured: [4], capturing: false) == [4],
+            "退出录入后不会无配置地继续接管 DPI 键"
+        )
+        let held: [UInt8] = [
+            0x11, 0xFF, 0x42, 0x00,
+            0x00, 0xFD, 0x00, 0x00
+        ]
+        expect(
+            LogitechHIDPPProtocol.activeButtons(in: held, ownedCIDs: [0x00FD])
+                == [LogitechHIDPPProtocol.dpiSwitchButton],
+            "DPI Switch 的 HID++ 按下报告进入统一按键录入管线"
+        )
+        expect(
+            Strings.buttonName(LogitechHIDPPProtocol.dpiSwitchButton) == "DPI 键",
+            "DPI Switch 在界面中使用明确名称而不是通用编号"
+        )
+    }
+
+    private static func hidppEncodesDPIAndChoosesOtherLevel() {
+        let levels = LogitechDPILevels.default
+        expect(levels.lower == 1_000 && levels.upper == 1_600, "DPI 切换默认值保留当前 1000 DPI 和第二档 1600 DPI")
+        expect(levels.target(after: 1_000) == 1_600, "当前位于低档时切换到高档")
+        expect(levels.target(after: 1_600) == 1_000, "当前位于高档时切换到低档")
+        expect(levels.target(after: 2_000) == 1_000, "当前值不在两档中时先恢复默认低档")
+        expect(levels.activeLevel(for: 1_000) == 1_000, "当前硬件 DPI 命中配置时高亮对应功能键")
+        expect(levels.activeLevel(for: 2_000) == nil, "当前硬件 DPI 不在配置中时不误高亮任一档")
+        expect(
+            LogitechDPILevels(lower: 449, upper: 3_951)
+                == LogitechDPILevels(lower: 400, upper: 4_000),
+            "DPI 配置被裁剪并对齐到 M750 的 100 DPI 步进"
+        )
+        expect(
+            LogitechHIDPPProtocol.setDPIParameters(1_600) == [0x00, 0x06, 0x40],
+            "SetSensorDpi 使用 sensor index 加 16 位大端 DPI"
+        )
+        expect(
+            LogitechHIDPPProtocol.dpi(
+                from: [0x11, 0xFF, 0x09, 0x21, 0x00, 0x03, 0xE8]
+            ) == 1_000,
+            "GetSensorDpi 响应解析出当前 1000 DPI"
         )
     }
 
@@ -1627,6 +1723,21 @@ enum SelfCheck {
         expect(allMatched, "每个动作类型都能与 MouseAction 双向转换")
     }
 
+    private static func preservesDPILevelsPayload() {
+        let original = MouseAction.toggleDPI(LogitechDPILevels(lower: 800, upper: 2_000))
+        expect(
+            ActionKind.toggleDPI.makeAction(preserving: original) == original,
+            "切换动作后再切回来不会丢掉两个 DPI 档位"
+        )
+        do {
+            let data = try JSONEncoder().encode(original)
+            let decoded = try JSONDecoder().decode(MouseAction.self, from: data)
+            expect(decoded == original, "两个 DPI 档位经过配置 JSON 往返后保持一致")
+        } catch {
+            expect(false, "DPI 动作 JSON 编解码抛出异常: \(error)")
+        }
+    }
+
     private static func preservesShortcutPayload() {
         let combo = KeyCombo(keyCode: 48, modifiers: CGEventFlags.maskCommand.rawValue)
         let original = MouseAction.keyStroke(combo)
@@ -1805,6 +1916,21 @@ enum SelfCheck {
             AppVersion.value("CFBundleShortVersionString", in: ["CFBundleShortVersionString": "2.3.4"])
                 == "2.3.4",
             "应用版本只取自 Info.plist 提供的值"
+        )
+    }
+
+    private static func debugPreferencesAreIsolated() {
+        expect(
+            SettingsStore.applicationSupportFolderName(
+                bundleIdentifier: SettingsStore.productionBundleIdentifier
+            ) == "OpenMouse",
+            "正式版继续使用原有配置目录"
+        )
+        expect(
+            SettingsStore.applicationSupportFolderName(
+                bundleIdentifier: SettingsStore.debugBundleIdentifier
+            ) == "OpenMouse Debug",
+            "Debug 测试版使用独立配置目录，不覆盖正式版"
         )
     }
 
@@ -2642,9 +2768,10 @@ enum SelfCheck {
     }
 
     /// Every action in the picker must actually do something. `handledElsewhere` is only
-    /// legitimate for the two that are handled by the event router rather than by posting.
+    /// legitimate for actions handled by the event router or hardware manager rather than by
+    /// posting synthesized input.
     private static func everyActionHasAStroke() {
-        let handledByRouter: Set<ActionKind> = [.passthrough, .gestureNavigation]
+        let handledByRouter: Set<ActionKind> = [.passthrough, .gestureNavigation, .toggleDPI]
         var unimplemented: [String] = []
         for kind in ActionKind.allCases where !handledByRouter.contains(kind) {
             let action = kind.makeAction(preserving: .passthrough)

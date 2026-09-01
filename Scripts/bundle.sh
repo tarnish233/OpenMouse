@@ -10,11 +10,26 @@ ROOT="$PWD"
 CONFIG="${CONFIG:-release}"
 DISTRIBUTION="${DISTRIBUTION:-0}"
 COMMUNITY_DISTRIBUTION="${COMMUNITY_DISTRIBUTION:-0}"
-APP_NAME="Open Mouse"
+DEBUG_VARIANT="${DEBUG_VARIANT:-0}"
 EXECUTABLE="OpenMouse"
 UPDATER_EXECUTABLE="OpenMouseUpdater"
 OUT_DIR="${OUT_DIR:-$ROOT/build}"
+
+if [ "$DEBUG_VARIANT" = "1" ]; then
+  APP_NAME="Open Mouse Debug"
+  BUNDLE_IDENTIFIER="com.openmouse.OpenMouse.debug"
+  BUNDLE_EXECUTABLE="OpenMouseDebug"
+else
+  APP_NAME="Open Mouse"
+  BUNDLE_IDENTIFIER="com.openmouse.OpenMouse"
+  BUNDLE_EXECUTABLE="$EXECUTABLE"
+fi
 APP="$OUT_DIR/$APP_NAME.app"
+
+if [ "$DEBUG_VARIANT" = "1" ]   && { [ "$DISTRIBUTION" = "1" ] || [ "$COMMUNITY_DISTRIBUTION" = "1" ]; }; then
+  echo "error: Debug variant cannot be used for a distribution build" >&2
+  exit 1
+fi
 
 if [ "$DISTRIBUTION" = "1" ] && [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
   echo "error: Developer ID and community distribution modes are mutually exclusive" >&2
@@ -46,9 +61,13 @@ if [ ! -f "$ROOT/Resources/AppIcon.icns" ] \
   swift "$ROOT/Scripts/make_icon.swift"
 fi
 
-cp "$BIN_PATH" "$APP/Contents/MacOS/$EXECUTABLE"
+cp "$BIN_PATH" "$APP/Contents/MacOS/$BUNDLE_EXECUTABLE"
 cp "$UPDATER_BIN_PATH" "$APP/Contents/Helpers/$UPDATER_EXECUTABLE"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_IDENTIFIER" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $BUNDLE_EXECUTABLE" "$APP/Contents/Info.plist"
 [ -f "$ROOT/LICENSE" ] && cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
 [ -f "$ROOT/THIRD_PARTY_NOTICES.md" ] \
   && cp "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
@@ -132,7 +151,7 @@ if [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
 fi
 if [ "$DISTRIBUTION" = "1" ] || [ "$COMMUNITY_DISTRIBUTION" = "1" ]; then
   echo "==> smoke-testing signed release executables"
-  "$APP/Contents/MacOS/$EXECUTABLE" --self-check >/dev/null
+  "$APP/Contents/MacOS/$BUNDLE_EXECUTABLE" --self-check >/dev/null
   "$APP/Contents/Helpers/$UPDATER_EXECUTABLE" --self-check >/dev/null
 fi
 echo "==> done: $APP"

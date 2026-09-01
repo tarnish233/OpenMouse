@@ -83,7 +83,7 @@ struct ActionRunner {
     /// Exhaustive by design: adding a `MouseAction` without a stroke here will not compile.
     static func stroke(for action: MouseAction) -> Stroke {
         switch action {
-        case .passthrough, .gestureNavigation:
+        case .passthrough, .gestureNavigation, .toggleDPI:
             .handledElsewhere
 
         // Window management, taken from the system's own shortcut configuration.

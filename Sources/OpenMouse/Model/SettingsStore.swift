@@ -6,7 +6,15 @@ import Observation
 @MainActor
 @Observable
 final class SettingsStore {
+    nonisolated static let productionBundleIdentifier = "com.openmouse.OpenMouse"
+    nonisolated static let debugBundleIdentifier = "com.openmouse.OpenMouse.debug"
     static let shared = SettingsStore()
+
+    /// Debug bundles must never share the production preferences file. Besides keeping test data
+    /// disposable, this prevents a stale test process from overwriting the user's real mappings.
+    nonisolated static func applicationSupportFolderName(bundleIdentifier: String?) -> String {
+        bundleIdentifier == debugBundleIdentifier ? "OpenMouse Debug" : "OpenMouse"
+    }
 
     var preferences: Preferences {
         didSet {
@@ -30,7 +38,10 @@ final class SettingsStore {
         let support = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let folder = support.appendingPathComponent("OpenMouse", isDirectory: true)
+        let folderName = Self.applicationSupportFolderName(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        )
+        let folder = support.appendingPathComponent(folderName, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         fileURL = folder.appendingPathComponent("preferences.json")
 

@@ -7,6 +7,7 @@ import SwiftUI
 /// buttons that are.
 struct ButtonsSettingsPane: View {
     @State private var store = SettingsStore.shared
+    @State private var engine = MouseEngine.shared
     @State private var isRecording = false
     @State private var highlightedID: UUID?
 
@@ -31,6 +32,7 @@ struct ButtonsSettingsPane: View {
                         BindingRow(
                             binding: $binding,
                             isHighlighted: highlightedID == binding.id,
+                            currentDPI: engine.currentLogitechDPI,
                             onRemove: { remove(binding) }
                         )
                     }
@@ -54,6 +56,7 @@ struct ButtonsSettingsPane: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 8, for: .scrollContent)
+        .onAppear { engine.refreshLogitechDPI() }
         .sheet(isPresented: $isRecording) {
             ButtonRecorderSheet { press in
                 add(press)
@@ -70,7 +73,14 @@ struct ButtonsSettingsPane: View {
             highlightedID = existing.id
             return
         }
-        let binding = ButtonBinding(button: press.button, modifiers: press.modifiers)
+        let defaultAction: MouseAction = press.button == LogitechHIDPPProtocol.dpiSwitchButton
+            ? .toggleDPI(.default)
+            : .passthrough
+        let binding = ButtonBinding(
+            button: press.button,
+            modifiers: press.modifiers,
+            action: defaultAction
+        )
         store.preferences.buttons.append(binding)
         store.preferences.buttons.sort { ($0.button, $0.modifiers) < ($1.button, $1.modifiers) }
         highlightedID = binding.id
@@ -86,6 +96,7 @@ struct ButtonsSettingsPane: View {
 private struct BindingRow: View {
     @Binding var binding: ButtonBinding
     let isHighlighted: Bool
+    let currentDPI: Int?
     let onRemove: () -> Void
 
     var body: some View {
@@ -102,7 +113,7 @@ private struct BindingRow: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
-            ActionRow(action: $binding.action)
+            ActionRow(action: $binding.action, currentDPI: currentDPI)
 
             Button(role: .destructive) { onRemove() } label: {
                 Image(systemName: "minus.circle")
@@ -130,10 +141,10 @@ private struct ButtonBadge: View {
                 .font(.system(size: 12, weight: .medium))
         }
         .monospacedDigit()
+        .frame(minWidth: 52, alignment: .center)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 6))
-        .frame(minWidth: 96, alignment: .leading)
     }
 }
 
@@ -207,6 +218,7 @@ private struct ButtonRecorderSheet: View {
 
 private struct ActionRow: View {
     @Binding var action: MouseAction
+    let currentDPI: Int?
 
     private var kind: Binding<ActionKind> {
         Binding(
@@ -216,8 +228,8 @@ private struct ActionRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            // A flat picker with two dozen actions is an unusable ribbon of text. Grouping
+        HStack(spacing: 10) {
+            // A flat picker with dozens of actions is an unusable ribbon of text. Grouping
             // them into submenus keeps the whole list two clicks away and one screen tall,
             // with the default sitting at the top level where it is one click.
             Menu {
@@ -241,6 +253,11 @@ private struct ActionRow: View {
             .fixedSize()
 
             switch action {
+            case let .toggleDPI(levels):
+                DPIToggleEditor(
+                    levels: levelsBinding(levels),
+                    currentDPI: currentDPI
+                )
             case .keyStroke:
                 ShortcutRecorderView(combo: comboBinding)
             case let .launchApp(path):
@@ -286,6 +303,16 @@ private struct ActionRow: View {
         )
     }
 
+    private func levelsBinding(_ fallback: LogitechDPILevels) -> Binding<LogitechDPILevels> {
+        Binding(
+            get: {
+                if case let .toggleDPI(levels) = action { return levels }
+                return fallback
+            },
+            set: { action = .toggleDPI($0) }
+        )
+    }
+
     private func chooseApp() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
@@ -294,5 +321,108 @@ private struct ActionRow: View {
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         action = .launchApp(path: url.path)
+    }
+}
+
+private struct DPIToggleEditor: View {
+    @Binding var levels: LogitechDPILevels
+    let currentDPI: Int?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            DPIValueMenu(
+                value: levels.lower,
+                choices: lowerChoices,
+                isCurrent: activeDPI == levels.lower,
+                onSelect: { levels = LogitechDPILevels(lower: $0, upper: levels.upper) }
+            )
+
+            Image(systemName: "arrow.left.arrow.right")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+
+            DPIValueMenu(
+                value: levels.upper,
+                choices: upperChoices,
+                isCurrent: activeDPI == levels.upper,
+                onSelect: { levels = LogitechDPILevels(lower: levels.lower, upper: $0) }
+            )
+
+            if let currentDPI, activeDPI == nil {
+                Text(Strings.dpiCurrentValue(currentDPI))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .fixedSize()
+        .accessibilityElement(children: .contain)
+    }
+
+    private var activeDPI: Int? {
+        levels.activeLevel(for: currentDPI)
+    }
+
+    private var lowerChoices: [Int] {
+        LogitechDPILevels.choices.filter { $0 < levels.upper }
+    }
+
+    private var upperChoices: [Int] {
+        LogitechDPILevels.choices.filter { $0 > levels.lower }
+    }
+}
+
+private struct DPIValueMenu: View {
+    let value: Int
+    let choices: [Int]
+    let isCurrent: Bool
+    let onSelect: (Int) -> Void
+
+    var body: some View {
+        Group {
+            if isCurrent {
+                menu
+                    .menuStyle(.borderlessButton)
+                    .frame(minWidth: 78, minHeight: 24)
+                    .background(Color.accentColor, in: .rect(cornerRadius: 6))
+            } else {
+                menu
+                    .menuStyle(.button)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .menuIndicator(.hidden)
+        .controlSize(.small)
+        .fixedSize()
+        .help(isCurrent ? Strings.dpiCurrentHelp(value) : Strings.dpiChangeHelp)
+        .accessibilityLabel(Strings.dpiValue(value))
+        .accessibilityValue(
+            isCurrent
+                ? Strings.dpiCurrentAccessibilityValue
+                : Strings.dpiInactiveAccessibilityValue
+        )
+    }
+
+    private var menu: some View {
+        Menu {
+            ForEach(choices, id: \.self) { choice in
+                Button {
+                    onSelect(choice)
+                } label: {
+                    if choice == value {
+                        Label(Strings.dpiValue(choice), systemImage: "checkmark")
+                    } else {
+                        Text(Strings.dpiValue(choice))
+                    }
+                }
+            }
+        } label: {
+            Text(verbatim: Strings.dpiValue(value))
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(isCurrent ? Color.white : Color.primary)
+                .frame(minWidth: 78)
+        }
     }
 }
