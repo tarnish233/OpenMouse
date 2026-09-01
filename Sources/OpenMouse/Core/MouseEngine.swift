@@ -34,6 +34,7 @@ final class MouseEngine {
     /// file and subscribe to workspace notifications.
     private let store: SettingsStore?
     private let router: EventRouter
+    private let scrollComparison: ScrollComparisonSession?
     private let tap: any EventTapLifecycle
     /// A second tap, for pointer movement only, brought up while a gesture button is held.
     ///
@@ -50,10 +51,16 @@ final class MouseEngine {
     private var tapRetry: Timer?
     private var currentMainMask: CGEventMask?
     private var lastAppliedPreferences: Preferences?
+    private(set) var isComparingScroll = false
 
     private convenience init() {
         let store = SettingsStore.shared
-        let router = EventRouter(config: store.snapshot, scrollRules: store.scrollRules)
+        let scrollComparison = ScrollComparisonSession.shared
+        let router = EventRouter(
+            config: store.snapshot,
+            scrollRules: store.scrollRules,
+            scrollComparison: scrollComparison
+        )
         let tap = EventTapController(label: "main") { proxy, type, event in
             router.handle(proxy: proxy, type: type, event: event)
         }
@@ -74,6 +81,7 @@ final class MouseEngine {
             tap: tap,
             motionTap: motionTap,
             hidpp: hidpp,
+            scrollComparison: scrollComparison,
             isTrusted: { AccessibilityPermission.isTrusted }
         )
     }
@@ -85,10 +93,12 @@ final class MouseEngine {
         tap: any EventTapLifecycle,
         motionTap: any EventTapLifecycle,
         hidpp: LogitechHIDPPManager? = nil,
+        scrollComparison: ScrollComparisonSession? = nil,
         isTrusted: @escaping () -> Bool
     ) {
         self.store = store
         self.router = router
+        self.scrollComparison = scrollComparison
         self.tap = tap
         self.motionTap = motionTap
         self.hidpp = hidpp
@@ -124,6 +134,8 @@ final class MouseEngine {
     }
 
     func stop() {
+        scrollComparison?.end()
+        isComparingScroll = false
         teardownRuntime()
         status = .off
     }
@@ -143,7 +155,7 @@ final class MouseEngine {
         lastAppliedPreferences = prefs
         router.updateBindings(prefs.buttons)
 
-        guard prefs.enabled || isCapturingButton else {
+        guard prefs.enabled || isCapturingButton || isComparingScroll else {
             teardownRuntime()
             status = .off
             return
@@ -225,6 +237,38 @@ final class MouseEngine {
 
     func resetStats() {
         router.resetStats()
+    }
+
+    // MARK: Scroll comparison
+
+    func beginScrollComparison(settings: ScrollSettings) {
+        guard let scrollComparison else { return }
+        scrollComparison.begin(settings: settings)
+        guard !isComparingScroll else { return }
+        isComparingScroll = true
+        apply()
+    }
+
+    func updateScrollComparisonSettings(_ settings: ScrollSettings) {
+        scrollComparison?.update(settings: settings)
+    }
+
+    func setScrollComparisonPane(_ pane: ScrollComparisonSession.Pane) {
+        guard scrollComparison?.setHoveredPane(pane) == true else { return }
+        router.cancelInFlightScrolling()
+    }
+
+    func clearScrollComparisonPane(_ pane: ScrollComparisonSession.Pane) {
+        guard scrollComparison?.clearHoveredPane(pane) == true else { return }
+        router.cancelInFlightScrolling()
+    }
+
+    func endScrollComparison() {
+        guard isComparingScroll else { return }
+        scrollComparison?.end()
+        isComparingScroll = false
+        router.cancelInFlightScrolling()
+        apply()
     }
 
     // MARK: Button learning

@@ -24,6 +24,7 @@ final class EventRouter {
 
     private let config: Locked<ResolvedConfig>
     private let scrollRules: ScrollRuleResolver?
+    private let scrollComparison: ScrollComparisonSession?
     private let bindings = Locked<[ButtonBinding]>([])
     /// When set, button presses are reported here (with the modifiers held) and swallowed
     /// instead of being acted on, so the settings UI can record a binding from a real press.
@@ -73,6 +74,7 @@ final class EventRouter {
     init(
         config: Locked<ResolvedConfig>,
         scrollRules: ScrollRuleResolver? = nil,
+        scrollComparison: ScrollComparisonSession? = nil,
         usesInteractiveGestureNavigation: Bool = false,
         gestureOutput: any GestureNavigationOutput = DockSwipeSynthesizer.shared,
         runGestureAction: @escaping (MouseAction) -> Void = {
@@ -82,6 +84,7 @@ final class EventRouter {
     ) {
         self.config = config
         self.scrollRules = scrollRules
+        self.scrollComparison = scrollComparison
         self.usesInteractiveGestureNavigation = usesInteractiveGestureNavigation
         self.gestureOutput = gestureOutput
         self.runGestureAction = runGestureAction
@@ -124,6 +127,7 @@ final class EventRouter {
     func cancelInFlightScrolling() {
         animator.cancel()
         shiftWheelHorizontalMode = false
+        lastNotchTime = 0
     }
 
     /// Drop all swallowed-button ownership. Called when a tap is stopped or disabled mid-hold,
@@ -165,9 +169,19 @@ final class EventRouter {
     // MARK: - Scrolling
 
     private func handleScroll(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let resolved = resolvedScrollConfig(for: event)
-        guard resolved.active else { return Unmanaged.passUnretained(event) }
-        let settings = resolved.scroll
+        let targetPID = ScrollEventPoster.targetPID(from: event)
+        let settings: ScrollSettings
+        switch scrollComparison?.mode(forTargetPID: targetPID) {
+        case .system:
+            cancelInFlightScrolling()
+            return Unmanaged.passUnretained(event)
+        case let .openMouse(previewSettings):
+            settings = previewSettings
+        case nil:
+            let resolved = resolvedScrollConfig(for: event)
+            guard resolved.active else { return Unmanaged.passUnretained(event) }
+            settings = resolved.scroll
+        }
 
         // A continuous event means the device already reports pixel-level deltas:
         // a trackpad, a Magic Mouse, or a mouse with a hi-res driver. Those are smooth

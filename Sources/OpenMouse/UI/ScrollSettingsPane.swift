@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ScrollSettingsPane: View {
@@ -34,7 +35,6 @@ struct ScrollSettingsPane: View {
 
                 SliderRow(
                     title: Strings.scrollMinimumStep,
-                    help: Strings.scrollMinimumStepHelp,
                     value: scroll.minimumStep,
                     range: 4...120,
                     step: 0.2,
@@ -43,7 +43,6 @@ struct ScrollSettingsPane: View {
 
                 SliderRow(
                     title: Strings.scrollSpeed,
-                    help: Strings.scrollSpeedHelp,
                     value: scroll.speed,
                     range: 0.5...8,
                     step: 0.05,
@@ -52,7 +51,6 @@ struct ScrollSettingsPane: View {
 
                 SliderRow(
                     title: Strings.scrollSmoothness,
-                    help: Strings.scrollSmoothnessHelp,
                     value: scroll.smoothness,
                     range: 0...ScrollSettings.maxSmoothness,
                     step: 0.005,
@@ -62,7 +60,6 @@ struct ScrollSettingsPane: View {
 
                 SliderRow(
                     title: Strings.scrollAcceleration,
-                    help: Strings.scrollAccelerationHelp,
                     value: scroll.acceleration,
                     range: 1...6,
                     step: 0.1,
@@ -72,27 +69,40 @@ struct ScrollSettingsPane: View {
             }
 
             Section {
-                ScrollFeelPreview()
-            } header: {
-                Text("试一试")
-            } footer: {
-                Text("在上面的区域滚动，可以立刻感受当前参数。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button {
+                    ScrollComparisonWindowController.show()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "rectangle.split.2x1")
+                            .font(.title3)
+                            .foregroundStyle(.tint)
+                            .frame(width: 26)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(Strings.scrollTryButton)
+                                .foregroundStyle(.primary)
+                            Text(Strings.scrollTryButtonHelp)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: "arrow.up.right")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 3)
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Strings.scrollTryButtonHelp)
             }
 
-            Section {
+            Section(Strings.scrollSectionTrackpad) {
                 Toggle(Strings.scrollReverseTrackpad, isOn: scroll.reverseContinuousDevices)
                     .toggleStyle(.switch)
                 Toggle(Strings.scrollSmoothTrackpad, isOn: scroll.affectContinuousDevices)
                     .toggleStyle(.switch)
-            } header: {
-                Text(Strings.scrollSectionTrackpad)
-            } footer: {
-                Text(Strings.scrollTrackpadNote)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section(Strings.scrollSectionAdvanced) {
@@ -154,54 +164,110 @@ private struct LabelWithHelp: View {
 
 private struct SliderRow: View {
     let title: String
-    let help: String?
     @Binding var value: Double
     let range: ClosedRange<Double>
     let step: Double
     let format: (Double) -> String
 
+    private var steppedValue: Binding<Double> {
+        Binding(
+            get: { value },
+            set: { proposedValue in
+                let clamped = min(max(proposedValue, range.lowerBound), range.upperBound)
+                let stepCount = ((clamped - range.lowerBound) / step).rounded()
+                value = min(
+                    max(range.lowerBound + stepCount * step, range.lowerBound),
+                    range.upperBound
+                )
+            }
+        )
+    }
+
     var body: some View {
-        LabeledContent {
-            HStack(spacing: 12) {
-                Slider(value: $value, in: range, step: step)
-                    .frame(width: 200)
-                Text(format(value))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 56, alignment: .trailing)
-            }
-        } label: {
-            if let help {
-                LabelWithHelp(title, help: help)
-            } else {
-                Text(title)
-            }
+        HStack(alignment: .center, spacing: 10) {
+            Text(title)
+                .frame(width: 80, alignment: .leading)
+
+            StretchableSlider(value: steppedValue, range: range)
+                .frame(minWidth: 220, maxWidth: .infinity)
+                .accessibilityLabel(title)
+                .accessibilityValue(format(value))
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment:
+                        steppedValue.wrappedValue = value + step
+                    case .decrement:
+                        steppedValue.wrappedValue = value - step
+                    @unknown default:
+                        break
+                    }
+                }
+
+            Text(format(value))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .trailing)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// A short scrollable strip so tuning the sliders has immediate, physical feedback.
-private struct ScrollFeelPreview: View {
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                ForEach(1...40, id: \.self) { index in
-                    HStack {
-                        Text(String(format: "%02d", index))
-                            .monospacedDigit()
-                            .foregroundStyle(.tertiary)
-                        Rectangle()
-                            .fill(.tint.opacity(index % 5 == 0 ? 0.35 : 0.12))
-                            .frame(height: 6)
-                            .clipShape(.capsule)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: 24)
-                }
-            }
-            .padding(.vertical, 6)
+/// SwiftUI's macOS slider keeps its AppKit intrinsic width even inside a wider frame.
+/// Hosting NSSlider directly lets the track consume the proposed width instead of centering a
+/// short control inside a large invisible box.
+private struct StretchableSlider: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value)
+    }
+
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = NSSlider(
+            value: value,
+            minValue: range.lowerBound,
+            maxValue: range.upperBound,
+            target: context.coordinator,
+            action: #selector(Coordinator.valueChanged(_:))
+        )
+        slider.isContinuous = true
+        slider.numberOfTickMarks = 0
+        slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        slider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return slider
+    }
+
+    func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.value = $value
+        slider.minValue = range.lowerBound
+        slider.maxValue = range.upperBound
+        slider.doubleValue = value
+        slider.isEnabled = isEnabled
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: NSSlider,
+        context: Context
+    ) -> CGSize? {
+        CGSize(
+            width: proposal.width ?? nsView.intrinsicContentSize.width,
+            height: nsView.intrinsicContentSize.height
+        )
+    }
+
+    final class Coordinator: NSObject {
+        var value: Binding<Double>
+
+        init(value: Binding<Double>) {
+            self.value = value
         }
-        .frame(height: 132)
-        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 8))
+
+        @objc func valueChanged(_ sender: NSSlider) {
+            value.wrappedValue = sender.doubleValue
+        }
     }
 }

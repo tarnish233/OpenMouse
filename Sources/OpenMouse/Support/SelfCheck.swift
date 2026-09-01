@@ -126,6 +126,10 @@ enum SelfCheck {
             statusMenuTogglesBypassRule()
             appRuleEditorCoversEveryScrollField()
         }
+        group("滚动手感对比") {
+            comparisonOnlyOverridesOwnProcess()
+            comparisonKeepsTapAliveWhileMasterSwitchIsOff()
+        }
         group("按键映射") {
             defaultAction()
             modifierVariant()
@@ -801,6 +805,64 @@ enum SelfCheck {
         ) else { return nil }
         event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(targetPID))
         return event
+    }
+
+    // MARK: Scroll comparison
+
+    private static func comparisonOnlyOverridesOwnProcess() {
+        let session = ScrollComparisonSession(processID: 4242)
+        var settings = ScrollSettings.default
+        settings.smoothingEnabled = false
+        settings.speed = 4.25
+        session.begin(settings: settings)
+
+        expect(session.mode(forTargetPID: 4242) == nil, "指针没有进入任一侧时沿用正常应用规则")
+
+        session.setHoveredPane(.system)
+        expect(session.mode(forTargetPID: 4242) == .system, "左侧只为 Open Mouse 自身窗口放行原始滚动")
+        expect(session.mode(forTargetPID: 9001) == nil, "对比窗口不会改写其他应用的滚动策略")
+
+        session.setHoveredPane(.openMouse)
+        if case let .openMouse(previewSettings) = session.mode(forTargetPID: 4242) {
+            expect(previewSettings.smoothingEnabled, "右侧即使总设置暂时关闭平滑也会启用对比效果")
+            expect(previewSettings.speed == 4.25, "右侧沿用用户当前的滚动参数")
+        } else {
+            expect(false, "右侧能解析为 Open Mouse 对比模式")
+        }
+
+        session.clearHoveredPane(.openMouse)
+        expect(session.mode(forTargetPID: 4242) == nil, "移出对比区域后立即恢复正常应用规则")
+        session.end()
+    }
+
+    private static func comparisonKeepsTapAliveWhileMasterSwitchIsOff() {
+        MainActor.assumeIsolated {
+            let session = ScrollComparisonSession(processID: getpid())
+            let router = EventRouter(
+                config: Locked(.inactive),
+                scrollComparison: session
+            )
+            let mainTap = ProbeEventTap()
+            let motionTap = ProbeEventTap()
+            let engine = MouseEngine(
+                store: nil,
+                router: router,
+                tap: mainTap,
+                motionTap: motionTap,
+                scrollComparison: session,
+                isTrusted: { true }
+            )
+            var preferences = Preferences()
+            preferences.enabled = false
+            engine.apply(preferences: preferences, pollIfNeeded: false)
+            expect(!mainTap.isRunning && engine.status == .off, "总开关关闭时事件监听保持停用")
+
+            engine.beginScrollComparison(settings: preferences.scroll)
+            expect(mainTap.isRunning && engine.status == .running, "打开对比窗口会临时启动滚轮监听")
+
+            engine.endScrollComparison()
+            expect(!mainTap.isRunning && engine.status == .off, "关闭对比窗口后恢复总开关对应的停用状态")
+        }
     }
 
     // MARK: Buttons

@@ -9,10 +9,21 @@ enum AppActivationPolicy {
 
     static func enter() {
         count += 1
+        refreshDockIcon()
         // Promotion and foreground activation are separate operations. The window controller
         // waits for `didBecomeActive` before ordering its window, so it can never flash above the
         // current app via `orderFrontRegardless` and then fall behind it.
         NSApp.setActivationPolicy(.regular)
+    }
+
+    /// Launch Services can retain an older icon for an LSUIElement bundle even after the app
+    /// itself has been replaced. Setting the bundled image explicitly before promotion makes the
+    /// temporary Dock icon follow the currently running build instead of that stale cache entry.
+    private static func refreshDockIcon() {
+        guard let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let icon = NSImage(contentsOf: iconURL) else { return }
+        icon.isTemplate = false
+        NSApp.applicationIconImage = icon
     }
 
     static func leave() {
