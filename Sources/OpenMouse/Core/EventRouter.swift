@@ -35,6 +35,10 @@ final class EventRouter {
 
     /// Timestamp of the last wheel notch, for the flywheel acceleration curve.
     private var lastNotchTime: CFTimeInterval = 0
+    /// Axis mode of the last discrete wheel input. Switching Shift on or off must discard the
+    /// other axis's residual inertia, otherwise the first horizontal notch can glide diagonally
+    /// with vertical debt left from the preceding wheel spin.
+    private var shiftWheelHorizontalMode = false
     private enum ButtonClaim {
         case capture
         case action(MouseAction)
@@ -119,6 +123,7 @@ final class EventRouter {
 
     func cancelInFlightScrolling() {
         animator.cancel()
+        shiftWheelHorizontalMode = false
     }
 
     /// Drop all swallowed-button ownership. Called when a tap is stopped or disabled mid-hold,
@@ -268,6 +273,58 @@ final class EventRouter {
         axis.read(from: event).preferred
     }
 
+    struct WheelInput: Equatable {
+        let vertical: Double
+        let horizontal: Double
+        let shiftsVerticalToHorizontal: Bool
+    }
+
+    /// Logi Options+ semantics: Shift only converts a real vertical wheel event. Trackpad-style
+    /// continuous events and a physical horizontal/tilt wheel retain their native axes.
+    static func wheelInput(from event: CGEvent) -> WheelInput {
+        let rawVertical = rawDelta(of: event, axis: ScrollEventFields.vertical)
+        let rawHorizontal = rawDelta(of: event, axis: ScrollEventFields.horizontal)
+        let shiftsVerticalToHorizontal =
+            event.getIntegerValueField(.scrollWheelEventIsContinuous) == 0
+            && event.flags.contains(.maskShift)
+            && rawVertical != 0
+            && rawHorizontal == 0
+        return WheelInput(
+            vertical: shiftsVerticalToHorizontal ? 0 : rawVertical,
+            horizontal: shiftsVerticalToHorizontal ? rawVertical : rawHorizontal,
+            shiftsVerticalToHorizontal: shiftsVerticalToHorizontal
+        )
+    }
+
+    /// Rewrite every representation carried by a discrete wheel event. Shift is removed after
+    /// translation so browsers and NSScrollView do not see an already-horizontal event plus the
+    /// modifier and translate it a second time.
+    static func translateShiftWheelEvent(_ event: CGEvent, reverseHorizontal: Bool) {
+        let vertical = ScrollEventFields.vertical.read(from: event)
+        ScrollEventFields.horizontal.write(
+            reverseHorizontal ? vertical.negated : vertical,
+            on: event
+        )
+        ScrollEventFields.vertical.clear(on: event)
+        event.flags = event.flags.subtracting(.maskShift)
+    }
+
+    private static func prepareWheelPassthrough(
+        _ event: CGEvent,
+        input: WheelInput,
+        settings: ScrollSettings
+    ) {
+        if input.shiftsVerticalToHorizontal {
+            translateShiftWheelEvent(event, reverseHorizontal: settings.reverseHorizontal)
+        } else if settings.reverseVertical || settings.reverseHorizontal {
+            flipAxes(
+                of: event,
+                vertical: settings.reverseVertical,
+                horizontal: settings.reverseHorizontal
+            )
+        }
+    }
+
     /// Which of the three delta fields actually supplied the magnitude.
     ///
     /// Worth reporting rather than assuming: if this says `line`, every notch scales from the
@@ -282,8 +339,9 @@ final class EventRouter {
     }
 
     private func handleWheel(_ event: CGEvent, settings: ScrollSettings) -> Unmanaged<CGEvent>? {
-        let rawY = Self.rawDelta(of: event, axis: ScrollEventFields.vertical)
-        let rawX = Self.rawDelta(of: event, axis: ScrollEventFields.horizontal)
+        let input = Self.wheelInput(from: event)
+        let rawY = input.vertical
+        let rawX = input.horizontal
 
         guard rawY.isFinite, rawX.isFinite else {
             stats.withValue { $0.wheelEventsPassedThrough += 1 }
@@ -291,20 +349,19 @@ final class EventRouter {
         }
         guard rawY != 0 || rawX != 0 else { return Unmanaged.passUnretained(event) }
 
+        if input.shiftsVerticalToHorizontal != shiftWheelHorizontalMode {
+            animator.cancel()
+            shiftWheelHorizontalMode = input.shiftsVerticalToHorizontal
+        }
+
         let signY: Double = settings.reverseVertical ? -1 : 1
         let signX: Double = settings.reverseHorizontal ? -1 : 1
 
         guard settings.smoothingEnabled else {
             stats.withValue { $0.wheelEventsPassedThrough += 1 }
-            // No smoothing requested: the cheapest correct thing is to flip the existing
-            // event in place and let the system deliver it untouched.
-            if settings.reverseVertical || settings.reverseHorizontal {
-                Self.flipAxes(
-                    of: event,
-                    vertical: settings.reverseVertical,
-                    horizontal: settings.reverseHorizontal
-                )
-            }
+            // No smoothing requested: rewrite the original event in place and let the system
+            // deliver it, preserving every non-scroll field and the original target.
+            Self.prepareWheelPassthrough(event, input: input, settings: settings)
             return Unmanaged.passUnretained(event)
         }
 
@@ -328,14 +385,17 @@ final class EventRouter {
                 $0.wheelEventsUndeliverable += 1
                 $0.wheelEventsPassedThrough += 1
             }
-            if settings.reverseVertical || settings.reverseHorizontal {
-                Self.flipAxes(
-                    of: event,
-                    vertical: settings.reverseVertical,
-                    horizontal: settings.reverseHorizontal
-                )
-            }
+            Self.prepareWheelPassthrough(event, input: input, settings: settings)
             return Unmanaged.passUnretained(event)
+        }
+
+        if input.shiftsVerticalToHorizontal {
+            // The animator rewrites point/fixed-point deltas on each frame. Preparing its event
+            // template still matters for flags and for apps that inspect the line representation.
+            Self.translateShiftWheelEvent(
+                target.event,
+                reverseHorizontal: settings.reverseHorizontal
+            )
         }
 
         guard animator.enqueue(
@@ -345,6 +405,7 @@ final class EventRouter {
             target: target
         ) else {
             stats.withValue { $0.wheelEventsPassedThrough += 1 }
+            Self.prepareWheelPassthrough(event, input: input, settings: settings)
             return Unmanaged.passUnretained(event)
         }
         stats.withValue {

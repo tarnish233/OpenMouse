@@ -205,6 +205,7 @@ enum SelfCheck {
             tapsWhereTargetIsAnnotated()
             refusesUndeliverableTarget()
             reversesAllScrollFields()
+            shiftWheelRoutesHorizontally()
             continuousDevicePolicyIsConsistent()
             auxiliaryEventsCarrySyntheticTag()
         }
@@ -2018,6 +2019,77 @@ enum SelfCheck {
         expect(
             synthetic.point == 0 && synthetic.fixedPoint == 0.5,
             "合成亚像素滚动写入整数 PointDelta，并由 FixedPtDelta 保留小数"
+        )
+    }
+
+    private static func shiftWheelRoutesHorizontally() {
+        func makeEvent(flags: CGEventFlags, horizontalPoint: Int64 = 0, continuous: Bool = false) -> CGEvent? {
+            guard let event = CGEvent(
+                scrollWheelEvent2Source: nil,
+                units: .pixel,
+                wheelCount: 2,
+                wheel1: 2,
+                wheel2: 0,
+                wheel3: 0
+            ) else { return nil }
+            event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: 2)
+            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: 7)
+            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: 0.5)
+            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: horizontalPoint)
+            event.setIntegerValueField(.scrollWheelEventIsContinuous, value: continuous ? 1 : 0)
+            event.flags = flags
+            return event
+        }
+
+        guard let shifted = makeEvent(flags: [.maskShift, .maskCommand]),
+              let reversed = makeEvent(flags: [.maskShift]),
+              let plain = makeEvent(flags: []),
+              let tiltWheel = makeEvent(flags: [.maskShift], horizontalPoint: 3),
+              let continuous = makeEvent(flags: [.maskShift], continuous: true) else {
+            expect(false, "可构造 Shift+滚轮事件")
+            return
+        }
+
+        let routed = EventRouter.wheelInput(from: shifted)
+        expect(
+            routed == .init(vertical: 0, horizontal: 7, shiftsVerticalToHorizontal: true),
+            "Shift+真实垂直滚轮改走水平轴"
+        )
+        EventRouter.translateShiftWheelEvent(shifted, reverseHorizontal: false)
+        let shiftedVertical = ScrollEventFields.vertical.read(from: shifted)
+        let shiftedHorizontal = ScrollEventFields.horizontal.read(from: shifted)
+        expect(
+            shiftedVertical.line == 0 && shiftedVertical.point == 0 && shiftedVertical.fixedPoint == 0
+                && shiftedHorizontal.line == 2
+                && shiftedHorizontal.point == 7
+                && shiftedHorizontal.fixedPoint == 0.5,
+            "轴转换复制 DeltaAxis / PointDelta / FixedPtDelta 并清空垂直轴"
+        )
+        expect(
+            !shifted.flags.contains(.maskShift) && shifted.flags.contains(.maskCommand),
+            "轴转换只移除 Shift，避免应用二次转换并保留其他修饰键"
+        )
+
+        EventRouter.translateShiftWheelEvent(reversed, reverseHorizontal: true)
+        let reversedHorizontal = ScrollEventFields.horizontal.read(from: reversed)
+        expect(
+            reversedHorizontal.line == -2
+                && reversedHorizontal.point == -7
+                && reversedHorizontal.fixedPoint == -0.5,
+            "Shift+滚轮使用水平反转设置决定方向"
+        )
+
+        expect(
+            !EventRouter.wheelInput(from: plain).shiftsVerticalToHorizontal,
+            "没有 Shift 时垂直滚轮保持原轴"
+        )
+        expect(
+            !EventRouter.wheelInput(from: tiltWheel).shiftsVerticalToHorizontal,
+            "已有水平增量的倾斜滚轮不会被重复转换"
+        )
+        expect(
+            !EventRouter.wheelInput(from: continuous).shiftsVerticalToHorizontal,
+            "触控板和连续滚动设备不受 Shift 转换影响"
         )
     }
 

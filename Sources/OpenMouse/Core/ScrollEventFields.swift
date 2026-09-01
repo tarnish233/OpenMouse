@@ -12,6 +12,10 @@ struct ScrollAxisFields {
         let point: Int64
         let fixedPoint: Double
 
+        var negated: Values {
+            Values(line: -line, point: -point, fixedPoint: -fixedPoint)
+        }
+
         /// Mos's precedence: pixel delta first, fixed-point delta second, line count last.
         var preferred: Double {
             if point != 0 { return Double(point) }
@@ -33,10 +37,17 @@ struct ScrollAxisFields {
     }
 
     func reverse(on event: CGEvent) {
-        let values = read(from: event)
-        event.setIntegerValueField(line, value: -values.line)
-        event.setIntegerValueField(point, value: -values.point)
-        event.setDoubleValueField(fixedPoint, value: -values.fixedPoint)
+        write(read(from: event).negated, on: event)
+    }
+
+    func write(_ values: Values, on event: CGEvent) {
+        event.setIntegerValueField(line, value: values.line)
+        event.setIntegerValueField(point, value: values.point)
+        event.setDoubleValueField(fixedPoint, value: values.fixedPoint)
+    }
+
+    func clear(on event: CGEvent) {
+        write(Values(line: 0, point: 0, fixedPoint: 0), on: event)
     }
 
     /// PointDelta is the integral pixel representation; FixedPtDelta retains the fractional
