@@ -39,6 +39,15 @@ UPDATER_BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$UPDATER_EXECUTABL
 echo "==> assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
+
+# The icon is generated from vector drawing code and intentionally ignored by Git. Rebuild it
+# on a fresh checkout, and whenever the drawing source is newer than the last generated asset.
+if [ ! -f "$ROOT/Resources/AppIcon.icns" ] \
+  || [ "$ROOT/Scripts/make_icon.swift" -nt "$ROOT/Resources/AppIcon.icns" ]; then
+  echo "==> generating AppIcon.icns"
+  swift "$ROOT/Scripts/make_icon.swift"
+fi
+
 cp "$BIN_PATH" "$APP/Contents/MacOS/$EXECUTABLE"
 cp "$UPDATER_BIN_PATH" "$APP/Contents/Helpers/$UPDATER_EXECUTABLE"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"

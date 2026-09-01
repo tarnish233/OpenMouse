@@ -5,7 +5,6 @@ Package.resolved
 
 # Assembled app bundle and generated icon
 build/
-Resources/AppIcon.icns
 
 # macOS
 .DS_Store
