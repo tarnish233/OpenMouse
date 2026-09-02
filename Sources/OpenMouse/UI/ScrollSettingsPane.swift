@@ -214,8 +214,10 @@ private struct SliderRow: View {
 
 /// SwiftUI's macOS slider keeps its AppKit intrinsic width even inside a wider frame.
 /// Hosting NSSlider directly lets the track consume the proposed width instead of centering a
-/// short control inside a large invisible box.
-private struct StretchableSlider: NSViewRepresentable {
+/// short control inside a large invisible box. It also keeps `numberOfTickMarks` at zero —
+/// SwiftUI's `Slider(value:in:step:)` draws a row of tick dots under the track for any stepped
+/// slider, which reads as a stray grid line. Shared with the pointer pane for that reason.
+struct StretchableSlider: NSViewRepresentable {
     @Environment(\.isEnabled) private var isEnabled
 
     @Binding var value: Double

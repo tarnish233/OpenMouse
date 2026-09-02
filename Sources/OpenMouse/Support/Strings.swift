@@ -40,7 +40,14 @@ enum Strings {
 
     // Window / tabs
     static let settingsTitle = "Open Mouse 设置"
+    static let settingsSave = "保存"
+    static let settingsSaved = "已保存"
+    static let settingsSaveHelp = "改动已经在生效，可以先体验。点击保存才会写入配置；直接关闭窗口会放弃并恢复。"
+    static let settingsSavedHelp = "没有未保存的改动。"
+    static let settingsRevert = "撤销"
+    static let settingsRevertHelp = "放弃全部未保存的改动，立刻回到上次保存的状态。不是逐步撤销。"
     static let tabScroll = "滚动"
+    static let tabPointer = "指针"
     static let tabButtons = "按键"
     static let tabApps = "应用"
     static let tabGeneral = "通用"
@@ -123,6 +130,37 @@ enum Strings {
     static let dpiChangeHelp = "点击修改 DPI"
     static let dpiCurrentAccessibilityValue = "当前使用"
     static let dpiInactiveAccessibilityValue = "未使用"
+
+    // Pointer pane
+    static let pointerSectionTitle = "指针速度"
+    static let pointerIntro = "逐个设备调整指针速度，任何品牌的鼠标都适用，不依赖厂商驱动。"
+        + "勾选要接管的设备——列表里也会出现键盘和虚拟设备，系统没有可靠的办法把它们区分开，所以由你来选。"
+    static let pointerCurveNote = "这里调的是加速曲线，不是硬件 DPI：快速甩动被放大的比例比慢速微调更大。"
+        + "在「系统设置 › 鼠标 › 跟踪速度」拖动后，系统会覆盖这里的值，重新插拔设备或改动本页会再次生效。"
+    static let pointerEmpty = "没有找到可调整的指针设备"
+    static let pointerEmptyBody = "连接一只鼠标后它会出现在这里。触控板不在此列——它已经是像素级连续输入。"
+    static let pointerRestoreDefaults = "全部恢复系统默认"
+    static let pointerRestoreDefaultsHelp = "取消所有勾选，并把当前连接的每只鼠标都写回系统跟踪速度。"
+        + "上次退出时如果没能正常恢复，用这个兜底。"
+    static let pointerUnnamedDevice = "未命名设备"
+    static let pointerValueTitle = "速度"
+    static let pointerStateApplied = "已生效"
+    static let pointerStateOffline = "设备未连接"
+    static let pointerStateOfflineHelp = "这条设置仍然保留，设备接回来就会自动重新生效。"
+    static let pointerStateUnsupported = "设备不支持"
+    static let pointerStateUnsupportedHelp = "系统没有为它提供可读写的指针加速属性。macOS 正在逐步移除这套属性，"
+        + "触控板和部分设备已经不再支持。"
+    static let pointerStateRejected = "系统拒绝了设置"
+    static let pointerStateRejectedHelp = "写入被系统拒绝，或者写入成功但读回的值不对。日志 category 为 pointer。"
+    static func pointerDeviceIdentity(_ vendorID: Int, _ productID: Int) -> String {
+        String(format: "0x%04X / 0x%04X", vendorID, productID)
+    }
+    static func pointerValue(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+    static func pointerSystemDefaultHint(_ value: Double) -> String {
+        "系统默认 \(pointerValue(value))"
+    }
 
     // Recorder sheet
     static let recorderTitle = "录入鼠标按键"

@@ -19,7 +19,9 @@ private struct SettingsCodingKey: CodingKey {
 }
 
 /// Keeps an invalid element from making `JSONDecoder` discard an otherwise valid array.
-private struct LossyDecoded<Value: Decodable>: Decodable {
+/// Shared across persisted types: `Preferences.buttons` and `PointerSpeedSettings.devices`
+/// both need one bad row to cost only that row.
+struct LossyDecoded<Value: Decodable>: Decodable {
     let value: Value?
 
     init(from decoder: Decoder) throws {
@@ -442,6 +444,10 @@ struct Preferences: Codable, Equatable, Sendable {
     var buttons: [ButtonBinding] = []
     var rules: [AppRule] = []
     var update = UpdateSettings()
+    /// Per-device pointer acceleration. Not part of `ResolvedConfig`: nothing on the event-tap
+    /// path reads it, because it is applied by writing HID properties rather than by rewriting
+    /// events.
+    var pointer = PointerSpeedSettings()
 
     /// Decoded field by field so that changing the shape of one section cannot discard the
     /// others. A settings file is long-lived; losing a user's whole configuration because
@@ -457,6 +463,8 @@ struct Preferences: Codable, Equatable, Sendable {
         buttons = decodedButtons?.compactMap(\.value) ?? []
         rules = (try? container.decode([AppRule].self, forKey: .rules)) ?? []
         update = (try? container.decode(UpdateSettings.self, forKey: .update)) ?? UpdateSettings()
+        pointer = (try? container.decode(PointerSpeedSettings.self, forKey: .pointer))
+            ?? PointerSpeedSettings()
     }
 
     init() {}
@@ -490,11 +498,43 @@ struct Preferences: Codable, Equatable, Sendable {
         // which in the new model would show up as a page of empty rows.
         buttons.removeAll { !$0.isActive }
         buttons.sort { ($0.button, $0.modifiers) < ($1.button, $1.modifiers) }
+        pointer.normalize()
+    }
+}
+
+// MARK: - Draft sections
+
+/// The sections the settings window edits as a draft: change one and you feel it immediately, but
+/// it only reaches disk when you press 保存, and closing the window throws it away.
+///
+/// Deliberately not every section. `enabled` is the menu bar's master switch and `update` is
+/// background behavior — neither is something you *try out*, and hiding them behind a Save button
+/// in a window the user may never open would strand them. "登录时启动" and the menu bar icon never
+/// enter `Preferences` at all, so they sit outside this by construction rather than by exception.
+struct DraftSections: Equatable, Sendable {
+    var scroll: ScrollSettings
+    var buttons: [ButtonBinding]
+    var rules: [AppRule]
+    var pointer: PointerSpeedSettings
+
+    init(_ preferences: Preferences) {
+        scroll = preferences.scroll
+        buttons = preferences.buttons
+        rules = preferences.rules
+        pointer = preferences.pointer
+    }
+
+    func applied(to preferences: Preferences) -> Preferences {
+        var result = preferences
+        result.scroll = scroll
+        result.buttons = buttons
+        result.rules = rules
+        result.pointer = pointer
+        return result
     }
 }
 
 // MARK: - Resolved snapshot
-
 /// A flattened view of the preferences for one application identity.
 /// The event tap reads this on every event, so it must stay a plain value.
 struct ResolvedConfig: Equatable, Sendable {

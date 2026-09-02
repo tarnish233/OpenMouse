@@ -187,7 +187,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleFrontmostApp() {
         guard let bundleID = store.frontmostBundleID else { return }
         let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? bundleID
-        store.preferences.toggleBypassRule(bundleID: bundleID, name: name)
+        store.toggleBypassRule(bundleID: bundleID, name: name)
     }
 
     @objc private func openSettings() {

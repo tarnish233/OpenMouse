@@ -30,6 +30,17 @@ final class SettingsStore {
     /// Resolves scroll rules from the event's annotated target pid without IPC in the tap.
     let scrollRules = ScrollRuleResolver()
 
+    /// The last saved state of the draft sections, held only while the settings window is open.
+    ///
+    /// `preferences` always stays the live state — that is what makes an unsaved change something
+    /// you can actually feel — so the draft is tracked by remembering what disk should still say.
+    private(set) var savedDraft: DraftSections?
+
+    var hasUnsavedChanges: Bool {
+        guard let savedDraft else { return false }
+        return savedDraft != DraftSections(preferences)
+    }
+
     private(set) var frontmostBundleID: String?
     private var saveTask: Task<Void, Never>?
     private let fileURL: URL
@@ -119,9 +130,17 @@ final class SettingsStore {
         return try? JSONDecoder().decode(Preferences.self, from: data)
     }
 
+    /// What belongs on disk right now: the live values for everything that applies immediately,
+    /// but the last *saved* values for the draft sections. Without this the 400 ms autosave would
+    /// quietly persist a draft the user never committed, and "只有点击保存才算数" would be a lie
+    /// the moment the app restarted.
+    private var persistedPreferences: Preferences {
+        savedDraft?.applied(to: preferences) ?? preferences
+    }
+
     private func scheduleSave() {
         saveTask?.cancel()
-        let preferences = preferences
+        let preferences = persistedPreferences
         let fileURL = fileURL
         saveTask = PreferencesSaveWorker.schedule(preferences: preferences) { data in
             try? data.write(to: fileURL, options: .atomic)
@@ -130,11 +149,39 @@ final class SettingsStore {
 
     func saveNow() {
         saveTask?.cancel()
-        guard let data = PreferencesSaveWorker.encodedData(for: preferences) else { return }
+        guard let data = PreferencesSaveWorker.encodedData(for: persistedPreferences) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
 
     var preferencesFileURL: URL { fileURL }
+
+    // MARK: Editing session
+
+    /// Opens a draft session, which the settings window owns for as long as it is on screen.
+    /// Idempotent: reopening the window must not adopt the current draft as the saved state.
+    func beginEditing() {
+        guard savedDraft == nil else { return }
+        savedDraft = DraftSections(preferences)
+    }
+
+    func saveEdits() {
+        savedDraft = DraftSections(preferences)
+        saveNow()
+    }
+
+    /// Puts the live state back to what was last saved. Assigning `preferences` is what makes the
+    /// revert perceptible — the tap snapshot and the pointer controller both follow it — so a
+    /// discarded pointer speed springs back rather than lingering until relaunch.
+    func discardEdits() {
+        guard let savedDraft, hasUnsavedChanges else { return }
+        preferences = savedDraft.applied(to: preferences)
+    }
+
+    func endEditing() {
+        discardEdits()
+        savedDraft = nil
+        saveNow()
+    }
 
     // MARK: Mutations
 
@@ -146,6 +193,23 @@ final class SettingsStore {
         var fresh = Preferences()
         fresh.normalize()
         preferences = fresh
+        // An explicit "reset everything" is not a draft. Leaving half of it pending behind the
+        // Save button would make that button's meaning depend on which section you looked at.
+        commitImmediately()
+    }
+
+    /// The status menu's "disable for this app" is a menu action, not an editing gesture: it must
+    /// stick whether or not the settings window happens to be open behind it.
+    func toggleBypassRule(bundleID: String, name: String) {
+        preferences.toggleBypassRule(bundleID: bundleID, name: name)
+        commitImmediately()
+    }
+
+    /// Folds the current live state into the saved baseline, so a mutation made outside the
+    /// settings window is not left looking like an unsaved edit.
+    private func commitImmediately() {
+        if savedDraft != nil { savedDraft = DraftSections(preferences) }
+        saveNow()
     }
 
     func updateBinding(_ binding: ButtonBinding) {

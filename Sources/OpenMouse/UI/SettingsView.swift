@@ -5,6 +5,7 @@ import SwiftUI
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case scroll
+    case pointer
     case buttons
     case apps
     case general
@@ -14,6 +15,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .scroll: Strings.tabScroll
+        case .pointer: Strings.tabPointer
         case .buttons: Strings.tabButtons
         case .apps: Strings.tabApps
         case .general: Strings.tabGeneral
@@ -23,6 +25,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .scroll: "arrow.up.arrow.down"
+        case .pointer: "cursorarrow.motionlines"
         case .buttons: "computermouse"
         case .apps: "square.grid.2x2"
         case .general: "gearshape"
@@ -56,6 +59,7 @@ enum AppVersion {
 
 struct SettingsView: View {
     @State private var navigation = SettingsNavigation.shared
+    @State private var store = SettingsStore.shared
     @State private var history: [SettingsTab] = [.scroll]
     @State private var historyIndex = 0
     @State private var isHistoryNavigation = false
@@ -79,6 +83,14 @@ struct SettingsView: View {
                     .disabled(historyIndex <= 0)
                 Button { goForward() } label: { Image(systemName: "chevron.right") }
                     .disabled(historyIndex >= history.count - 1)
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button(Strings.settingsRevert) { store.discardEdits() }
+                    .disabled(!store.hasUnsavedChanges)
+                    .help(Strings.settingsRevertHelp)
+                SaveButton(hasUnsavedChanges: store.hasUnsavedChanges) {
+                    store.saveEdits()
+                }
             }
         }
         .onChange(of: navigation.selectedTab) { _, _ in record() }
@@ -182,6 +194,26 @@ private struct EngineStatusFooter: View {
     }
 }
 
+// MARK: - Save
+
+/// Closing the window discards, so the button has to be the thing that says "there is something
+/// here to lose". Prominent and enabled while dirty, plain and disabled once everything is saved —
+/// a button that looks identical in both states would make silent discard feel like data loss.
+private struct SaveButton: View {
+    let hasUnsavedChanges: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(hasUnsavedChanges ? Strings.settingsSave : Strings.settingsSaved)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!hasUnsavedChanges)
+        .help(hasUnsavedChanges ? Strings.settingsSaveHelp : Strings.settingsSavedHelp)
+        .keyboardShortcut("s", modifiers: .command)
+    }
+}
+
 // MARK: - Detail
 
 private struct SettingsDetail: View {
@@ -191,6 +223,7 @@ private struct SettingsDetail: View {
         Group {
             switch tab {
             case .scroll: ScrollSettingsPane()
+            case .pointer: PointerSettingsPane()
             case .buttons: ButtonsSettingsPane()
             case .apps: AppRulesPane()
             case .general: GeneralSettingsPane()

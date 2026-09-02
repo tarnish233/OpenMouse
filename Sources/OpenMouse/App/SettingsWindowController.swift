@@ -41,6 +41,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if let tab {
             SettingsNavigation.shared.selectedTab = tab
         }
+        // Opens the draft session before the window exists, so the first thing any pane binds to
+        // is already inside a session and no early edit can escape the Save button.
+        SettingsStore.shared.beginEditing()
         if shared == nil {
             shared = SettingsWindowController()
         }
@@ -145,7 +148,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         stopWaitingForActivation()
         MouseEngine.shared.endButtonCapture()
-        SettingsStore.shared.saveNow()
+        // Ends the draft session: anything not saved is reverted here, which is also what makes
+        // an unsaved pointer speed spring back instead of outliving the window.
+        SettingsStore.shared.endEditing()
         activationLease.leave()
         Self.shared = nil
     }

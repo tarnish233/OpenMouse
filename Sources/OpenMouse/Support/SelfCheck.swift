@@ -228,6 +228,20 @@ enum SelfCheck {
             gestureSpaceStrokeMatchesLogiTrace()
             rejectsInvalidSystemHotkeyNumbers()
         }
+        group("草稿与保存") {
+            draftSectionsPartitionEveryPreferenceField()
+            savingKeepsImmediateSectionsLive()
+            discardingRestoresOnlyDraftSections()
+        }
+        group("指针速度") {
+            fixedPointRoundTripsMeasuredValues()
+            clampsPointerAccelerationDefensively()
+            pointerSettingsDegradeFieldByField()
+            pointerDeviceListSurvivesSchemaChanges()
+            pointerNormalizeDedupesDevices()
+            pointerStatesAreDistinguishable()
+            offlineDeviceKeepsItsRow()
+        }
         group("更新检查") {
             hasDefaultUpdateSource()
             comparesVersions()
@@ -3097,6 +3111,304 @@ enum SelfCheck {
         expect(
             UpdateChecker.release(from: releasesIndex, repository: "owner/repo") == nil,
             "没有版本标签的发布列表不会被误解析"
+        )
+    }
+
+    // MARK: 草稿与保存
+
+    /// Adding a field to `Preferences` must force a decision: does it wait for 保存, or apply at
+    /// once? Neither answer is wrong, but *not choosing* silently makes it immediate, which for
+    /// something the user can feel would break the promise the Save button makes. Comparing the
+    /// encoded key set is what makes the omission fail loudly here instead of shipping.
+    private static func draftSectionsPartitionEveryPreferenceField() {
+        let draftKeys: Set<String> = ["scroll", "buttons", "rules", "pointer"]
+        let immediateKeys: Set<String> = ["enabled", "update"]
+
+        guard let data = try? JSONEncoder().encode(Preferences()),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            expect(false, "偏好可以编码成对象以核对字段归类")
+            return
+        }
+        let encoded = Set(object.keys)
+        let expected = draftKeys.union(immediateKeys)
+        let unclassified = encoded.symmetricDifference(expected).sorted()
+        if unclassified.isEmpty {
+            expect(true, "偏好里每个字段都明确归入草稿或即时生效")
+        } else {
+            expect(
+                false,
+                "偏好里每个字段都明确归入草稿或即时生效（未归类：\(unclassified.joined(separator: "、"))）"
+            )
+        }
+        expect(
+            draftKeys.isDisjoint(with: immediateKeys),
+            "没有字段同时属于草稿和即时生效"
+        )
+    }
+
+    /// The persistence gate in one line: disk takes the live values for immediate sections and the
+    /// last saved values for draft sections. Getting this backwards would either lose settings the
+    /// user did save, or persist ones they only tried.
+    private static func savingKeepsImmediateSectionsLive() {
+        var saved = Preferences()
+        saved.scroll.speed = 1.0
+        saved.enabled = true
+        saved.update.checkAutomatically = true
+
+        var live = saved
+        live.scroll.speed = 9.0                       // draft: tried but not saved
+        live.pointer.devices = [
+            PointerSpeedDevice(vendorID: 1, productID: 1, name: "试用中", enabled: true),
+        ]
+        live.enabled = false                          // immediate: master switch
+        live.update.checkAutomatically = false        // immediate: background behavior
+
+        let onDisk = DraftSections(saved).applied(to: live)
+        expectClose(onDisk.scroll.speed, 1.0, "没保存的滚动改动不会写进配置文件")
+        expect(onDisk.pointer.devices.isEmpty, "没保存的指针设备不会写进配置文件")
+        expect(onDisk.enabled == false, "总开关不受保存按钮约束，立刻落盘")
+        expect(
+            onDisk.update.checkAutomatically == false,
+            "更新设置不受保存按钮约束，立刻落盘"
+        )
+    }
+
+    private static func discardingRestoresOnlyDraftSections() {
+        var saved = Preferences()
+        saved.scroll.smoothness = 0.5
+        saved.buttons = [ButtonBinding(button: 3, action: .missionControl)]
+
+        var live = saved
+        live.scroll.smoothness = 0.9
+        live.buttons = []
+        live.enabled = false
+
+        let baseline = DraftSections(saved)
+        expect(baseline != DraftSections(live), "改过草稿区就算有未保存的改动")
+
+        let reverted = baseline.applied(to: live)
+        expectClose(reverted.scroll.smoothness, 0.5, "放弃后滚动参数回到上次保存的值")
+        expect(reverted.buttons.count == 1, "放弃后按键映射回到上次保存的状态")
+        // Reverting must not undo something that was never part of the draft — the master switch
+        // was already committed the moment it was toggled.
+        expect(reverted.enabled == false, "放弃草稿不会把已经生效的总开关一起回滚")
+        expect(
+            DraftSections(reverted) == baseline,
+            "放弃之后草稿区与上次保存的状态一致，保存按钮回到「已保存」"
+        )
+    }
+
+    // MARK: 指针速度
+    //
+    // Pure logic only. The IOKit side has zero coverage here — a green run says nothing about
+    // whether any particular mouse can actually be steered, exactly as with the HID++ group.
+
+    /// Pins the measured constants. 45056 is what a live mouse service, the system-wide
+    /// `IOHIDSystem` property, and LinearMouse's hardcoded fallback all report.
+    private static func fixedPointRoundTripsMeasuredValues() {
+        expect(
+            PointerSpeed.fixed(PointerSpeed.systemDefault) == 45_056,
+            "系统默认 0.6875 编码为 16.16 的 45056"
+        )
+        expectClose(
+            PointerSpeed.value(fromFixed: 45_056),
+            0.6875,
+            "45056 解码回 0.6875"
+        )
+        expect(PointerSpeed.fixed(2.0) == 131_072, "实测「明显变快」的 2.0 编码为 131072")
+        expectClose(PointerSpeed.value(fromFixed: 16_384), 0.25, "实测「明显变慢」的 0.25 往返一致")
+        // A foreign value must read back as itself. Clamping here would make another tool's
+        // setting look like one of ours.
+        expectClose(
+            PointerSpeed.value(fromFixed: -65_536),
+            -1.0,
+            "别的工具写入的越界值原样读出，不会被夹成我们的范围"
+        )
+    }
+
+    private static func clampsPointerAccelerationDefensively() {
+        expectClose(PointerSpeed.clamped(-5), 0, "低于下界夹到 0")
+        expectClose(PointerSpeed.clamped(1_000), 40, "高于上界夹到 40")
+        // A non-finite value would become a garbage Int on the way to IOFixed, so it degrades
+        // to the default instead of to a bound.
+        expectClose(PointerSpeed.clamped(.nan), PointerSpeed.systemDefault, "NaN 退回系统默认值")
+        expectClose(
+            PointerSpeed.clamped(.infinity),
+            PointerSpeed.systemDefault,
+            "无穷大退回系统默认值而不是上界"
+        )
+        expect(
+            PointerSpeed.sliderRange.upperBound < PointerSpeed.range.upperBound,
+            "滑块范围窄于可存储范围，数字输入框仍能覆盖全程"
+        )
+        // A value typed past the slider's default zone must remain reachable on the slider,
+        // otherwise touching the slider silently snaps it back down.
+        expectClose(
+            PointerSpeed.sliderBounds(for: 1.0).upperBound,
+            PointerSpeed.sliderRange.upperBound,
+            "常用区间内滑块保持默认跨度"
+        )
+        expectClose(
+            PointerSpeed.sliderBounds(for: 10).upperBound,
+            10,
+            "手动输入超出常用区间时滑块跨度跟着放大"
+        )
+        let bounds = PointerSpeed.sliderBounds(for: 1.0)
+        expectClose(
+            PointerSpeed.snapped(0.70, within: bounds),
+            0.6875,
+            "滑块取值对齐到 0.0625 的整数倍"
+        )
+        expectClose(
+            PointerSpeed.snapped(.nan, within: bounds),
+            PointerSpeed.systemDefault,
+            "非有限值不会被吸附成边界值"
+        )
+    }
+
+    private static func pointerSettingsDegradeFieldByField() {
+        // A settings file written before this feature existed has no `pointer` key at all.
+        let legacy = """
+        {
+          "enabled": true,
+          "scroll": { "minimumStep": 12.5 },
+          "buttons": [ { "button": 3, "action": { "mute": {} } } ]
+        }
+        """
+        guard let legacyData = legacy.data(using: .utf8),
+              let decodedLegacy = try? JSONDecoder().decode(Preferences.self, from: legacyData) else {
+            expect(false, "缺少 pointer 键的老配置仍能解码")
+            return
+        }
+        expect(decodedLegacy.pointer.devices.isEmpty, "老配置的指针设置退回空列表")
+        expect(decodedLegacy.scroll.minimumStep == 12.5, "新增 pointer 字段不影响其他设置")
+        expect(decodedLegacy.buttons.count == 1, "新增 pointer 字段不影响按键映射")
+
+        let malformed = """
+        {
+          "pointer": { "devices": "not an array" }
+        }
+        """
+        guard let malformedData = malformed.data(using: .utf8),
+              let decodedMalformed = try? JSONDecoder().decode(Preferences.self, from: malformedData) else {
+            expect(false, "devices 类型不对时仍能解码")
+            return
+        }
+        expect(decodedMalformed.pointer.devices.isEmpty, "devices 类型不对退回空列表")
+    }
+
+    private static func pointerDeviceListSurvivesSchemaChanges() {
+        let json = """
+        {
+          "pointer": {
+            "devices": [
+              { "vendorID": 8227, "productID": 61465, "name": "MCHOSE A5", "enabled": true, "acceleration": 2.0 },
+              { "productID": 1, "name": "行里没有设备身份", "enabled": true },
+              { "vendorID": 4660, "productID": 2, "futureField": "ignored" },
+              { "vendorID": 4660, "productID": 3, "name": "越界", "enabled": true, "acceleration": 999 }
+            ]
+          }
+        }
+        """
+        guard let data = json.data(using: .utf8),
+              var decoded = try? JSONDecoder().decode(Preferences.self, from: data) else {
+            expect(false, "设备行结构变化时偏好仍能解码")
+            return
+        }
+        decoded.normalize()
+
+        expect(
+            decoded.pointer.devices.map(\.productID) == [2, 3, 61465],
+            "缺少设备身份的一行只跳过自身，其余设备全部保留"
+        )
+        let mchose = decoded.pointer.device(for: PointerDeviceKey(vendorID: 8227, productID: 61465))
+        expectClose(mchose?.acceleration ?? -1, 2.0, "完整的一行保留它的速度值")
+        expect(mchose?.enabled == true, "完整的一行保留它的勾选状态")
+        let partial = decoded.pointer.device(for: PointerDeviceKey(vendorID: 4660, productID: 2))
+        expect(partial?.enabled == false, "缺少 enabled 的行默认不接管设备")
+        expectClose(
+            partial?.acceleration ?? -1,
+            PointerSpeed.systemDefault,
+            "缺少 acceleration 的行退回系统默认值"
+        )
+        expectClose(
+            decoded.pointer.device(for: PointerDeviceKey(vendorID: 4660, productID: 3))?.acceleration ?? -1,
+            40,
+            "手改出的越界值在 normalize 时被夹回范围内"
+        )
+    }
+
+    private static func pointerNormalizeDedupesDevices() {
+        // Two rows for one device means whichever the UI edited might not be the one applied.
+        var settings = PointerSpeedSettings(devices: [
+            PointerSpeedDevice(vendorID: 1, productID: 1, name: "先出现的", enabled: true, acceleration: 2),
+            PointerSpeedDevice(vendorID: 1, productID: 1, name: "影子行", enabled: false, acceleration: 3),
+        ])
+        settings.normalize()
+        expect(settings.devices.count == 1, "同一设备的重复行只保留一条")
+        expect(settings.devices.first?.name == "先出现的", "保留的是第一条，后面的影子行被丢弃")
+        // An unchecked row is kept on purpose: it remembers a value for a device that may just
+        // be unplugged right now.
+        var kept = PointerSpeedSettings(devices: [
+            PointerSpeedDevice(vendorID: 2, productID: 2, name: "没勾选", enabled: false, acceleration: 1.5),
+        ])
+        kept.normalize()
+        expectClose(kept.devices.first?.acceleration ?? -1, 1.5, "未勾选的行不会被清掉，值也保留")
+    }
+
+    /// The whole point of the five-state machine: "asleep", "can't", and "refused" must never
+    /// render as the same thing, which is the standing complaint about the HID++ path.
+    private static func pointerStatesAreDistinguishable() {
+        let states = PointerSpeedController.ApplyState.allCases
+        expect(states.count == 5, "五种施加状态都在自检覆盖内")
+        let labels = states.compactMap(\.label)
+        expect(
+            Set(labels).count == labels.count,
+            "每种失败状态都有自己的文案，不会折叠成同一句话"
+        )
+        expect(
+            PointerSpeedController.ApplyState.disabled.label == nil,
+            "未启用不占用状态文案——复选框已经说明了"
+        )
+        for state in states where state.label != nil && state != .applied(PointerSpeed.systemDefault) {
+            expect(state.help != nil, "\(state.label ?? "") 附带可解释原因的说明")
+        }
+        expect(
+            PointerSpeedController.ApplyState.unsupported.isProblem
+                && PointerSpeedController.ApplyState.rejected.isProblem,
+            "「不支持」与「被拒绝」被标为需要用户注意"
+        )
+        expect(
+            !PointerSpeedController.ApplyState.offline.isProblem,
+            "设备只是没连接不算出错"
+        )
+    }
+
+    private static func offlineDeviceKeepsItsRow() {
+        let live = PointerDeviceKey(vendorID: 8227, productID: 61465)
+        let stored = PointerDeviceKey(vendorID: 1_133, productID: 50_504)
+        let rows = PointerSpeedController.rows(
+            discovered: [
+                .init(key: live, name: "MCHOSE A5", supportsAcceleration: true),
+            ],
+            settings: PointerSpeedSettings(devices: [
+                PointerSpeedDevice(
+                    vendorID: stored.vendorID,
+                    productID: stored.productID,
+                    name: "拔掉的鼠标",
+                    enabled: true
+                ),
+            ])
+        )
+        expect(rows.count == 2, "已连接与已配置的设备都会出现在列表里")
+        expect(rows.first?.key == live, "已连接的设备排在前面")
+        expect(
+            rows.last?.key == stored && rows.last?.isLive == false,
+            "配置过但没连接的设备保留它自己的一行，不会看起来像被删了"
+        )
+        expect(
+            rows.last?.name == "拔掉的鼠标",
+            "离线的一行用存下来的名字，而不是一串十六进制"
         )
     }
 }

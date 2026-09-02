@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 347 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
+make test     # 应用自检 393 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -35,7 +35,7 @@ make test                                        # 等价于 swift run -c debug 
 
 返回码即结果，失败会打出哪一条断言挂了。
 
-**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 17 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
+**没有办法从命令行只跑一个检查。** `SelfCheck.run()` 里是 21 个 `group("名字") { ... }` 顺序执行，没有过滤参数。要单独跑一组，临时注释掉 `run()` 里其他的 `group(...)` 调用——不要为了图快改断言本身。
 
 ### 调试
 
@@ -81,7 +81,7 @@ OpenMouse --check-update owner/repo   # 走真实网络检查更新并退出
 ## 代码分布
 
 - `Core/` —— 事件管线与所有系统交互。改行为基本只动这里。
-- `Model/` —— `Settings.swift`（`Preferences` / `MouseAction` / `KeyCombo` 等全部持久化类型，手写 `init(from:)` 的覆盖范围见约束 11）、`ActionKind.swift`（选择器用的扁平枚举 + 分组 + 双向转换）、`SettingsStore.swift`（JSON 持久化 + `ResolvedConfig` 快照）。
+- `Model/` —— `Settings.swift`（`Preferences` / `MouseAction` / `KeyCombo` / `DraftSections` 等全部持久化类型，手写 `init(from:)` 的覆盖范围见约束 11）、`ActionKind.swift`（选择器用的扁平枚举 + 分组 + 双向转换）、`PointerSpeedSettings.swift`（指针速度的持久化类型与实测常量）、`SettingsStore.swift`（JSON 持久化 + 草稿会话 + `ResolvedConfig` 快照）。
 - `UI/` —— SwiftUI 设置页，一个 pane 一个文件。
 - `App/` —— AppKit 生命周期、菜单栏、设置窗口。
 - `Support/` —— `SelfCheck.swift`（断言）、`Trace.swift`（os.Logger）、`Strings.swift`（全部文案）、`Locked.swift`。
@@ -108,10 +108,14 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
                     │      │                    └─▶ SpaceSwitchPacer   仅普通桌面动作节流
                     │      └─▶ EventTapController   motion tap（仅手势期间开启）
                     │
-                    ├─▶ SettingsStore      JSON 持久化 + ResolvedConfig 快照
+                    ├─▶ SettingsStore      JSON 持久化 + 草稿会话 + ResolvedConfig 快照
                     ├─▶ ConflictMonitor    同类软件检测（事件驱动，不轮询）
                     ├─▶ UpdateCoordinator ──▶ UpdateChecker（GitHub Releases）
                     └─▶ SettingsWindowController ──▶ SwiftUI 设置界面
+
+AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（不碰事件 tap）
+                    ├─▶ IOHIDEventSystemClient      长期持有，service 句柄不缓存
+                    └─▶ IOServiceAddMatchingNotification  设备增删触发重新施加
 ```
 
 事件掩码是**按当前配置动态算的**（`MouseEngine.eventMask(for:capturingButtons:)`）：没有生效的按键映射就不订阅按键事件，没有滚动时帧源会被销毁。所以「空闲时零开销」不是说法而是实现约束——加新功能时不要无条件扩大掩码。
@@ -140,6 +144,62 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
 - **单独绑定的“左右切换桌面”动作保留节流。** `SpaceSwitchPacer`：0.12s 间隔（Mos 同值），最多积压 2 步，反向时丢弃积压。**手势导航必须绕过 pacer**：2026-08-31 对 `logioptionsplus_agent` 的直接事件采样显示，它在每次物理按住的第一次方向锁定时立即发一次 `Control+Fn+Left/Right Arrow`，即使前一段桌面动画还在运行也不排队。
 - **媒体键不是键码**，走 `NSEvent.otherEvent(with: .systemDefined, subtype: 8)` + `NX_KEYTYPE_*` 装在 `data1`。
 - **功能行键码要一个个实测**：`160` = 调度中心、`131` = 启动台、`178` = 控制中心，在 macOS 26.6 上验证有效。`177`（聚焦）与 `176`（听写）实测**已失效**，故意没收入——宁可没有这一项，不要一个选得到但不动的选项。注意 Mos 的标识符 `appExpose` 看名字像「应用程序窗口」，但它界面上写的是「启动台」；名字不是证据，日志才是。
+
+## 指针速度
+
+给任意品牌鼠标改指针速度的路子是 **per-device 写 HID 加速属性**，和 Logitech HID++ 那条 DPI 路径没有任何关系。`PointerSpeedController` 挂在 `AppDelegate` 上而不是 `MouseEngine` 里——它不碰事件 tap，tap 因权限被挡住时它照样要工作。
+
+**不能叫 DPI。** `HIDPointerResolution` 才是线性速度（真正等价于 DPI），2026-09-02 在 macOS 26.6.2 实测**写入返回 false 且毫无效果**，补 acceleration latch 也没用。能用的是 `HIDMouseAcceleration`，那是加速**曲线**：同一档下快速甩动被放大的比例高于慢速微调。所以硬件档继续叫「切换 DPI」，这个功能叫「指针速度」，MCHOSE 在 DPI 项下永远不亮。
+
+实测数据（三方吻合的默认值 `0.6875` = 16.16 的 `45056`：设备 service、`IOHIDSystem` 全局属性、LinearMouse 的 `fallbackPointerAcceleration`）：
+
+| 键 | 读 | 写 | 效果 |
+|---|---|---|---|
+| `HIDMouseAcceleration` / `HIDPointerAcceleration` | 45056 | **true** | **可感知**（0.25 慢 / 2.0 快） |
+| `HIDPointerResolution` | nil | **false** | 无效 |
+| `HIDUseLinearScalingMouseAcceleration` | nil | false | LinearMouse 的「关闭加速」开关在本机是死的 |
+
+规律：**读得到的键才写得进去。** 所以「加速键读不到」= `.unsupported`，在尝试之前就能判定。
+
+五条硬性约束，全都踩过：
+
+1. **`IOHIDServiceClient` 是父 `IOHIDEventSystemClient` 会话里的句柄。** 父 client 一释放，service 句柄就是野指针，用它 **SIGSEGV**。client 必须长期持有；service 句柄反过来绝不能跨调用缓存，每次重新枚举。`stop()` 里恢复必须发生在释放 client **之前**。
+2. **必须检查 `IOHIDServiceClientSetProperty` 的 Bool 返回值，还要读回校验。** 返回 true 只说明事件系统收下了消息。LinearMouse 丢掉了这个返回值（`fc305e9` 加过、`2d01c2e` 撤回），它的 Pointer Speed 滑块在这台机器上写了也白写而毫无提示；它 PR #1052 断言 Tahoe 上 "writing still succeeds"，**实测为 false，不要采信**。Apple 正在逐步拆这套属性，所以「写失败」是常规路径。
+3. **`ApplyState` 五种状态不能折叠。** `disabled` / `applied` / `offline` / `unsupported` / `rejected` 各有独立文案，自检钉住这一点。这条是对 HID++ 那个「四种失败在界面上长得一模一样」问题的不重犯。`unsupported` 必须在**未勾选时也上报**——否则复选框是灰的却不说为什么。
+4. **不能启动时设一次。** 鼠标休眠/断开后 service 直接从事件系统消失（实测 service 数 134 → 133）。重新施加的触发是设备增删（`IOServiceAddMatchingNotification` on `IOHIDDevice`，400ms 去抖）、系统唤醒、偏好变化。**用注册表通知而不是 `IOHIDManager`**：后者要 `IOHIDManagerOpen` 打开设备，会把「输入监控」权限拖进一个本来不需要任何权限的功能。
+5. **恢复默认值要去读 `IOHIDSystem` 的系统全局值，不能存「启动时抓下来的原值」**（照 LinearMouse `Device.restorePointerAcceleration()`）。存下来的原值在用户改过系统跟踪速度后就是错的。只恢复**我们真正改过**的设备——别的工具可能拥有其他设备的值，「未启用」不等于「可以覆盖」。
+
+**权限：不需要辅助功能。** 2026-09-02 用从未授权过的 debug 包实测，日志 `started trusted=false` 的同时 `applied ... value=0.750000` 成功、读回确认。所以 `PointerSettingsPane` **不放 `PermissionBanner()`**——贴一个与本页无关的权限横幅是误导。`start()` 里那行 `trusted=` 日志刻意保留，用来回答故障报告里「是不是权限问题」。
+
+`ConformsTo(GenericDesktop=1, Mouse=2)` **远不是充分过滤**：本机 135 个 service 里 4 个命中，其中一个是 Kzzi-K75 **键盘**、一个是 Karabiner 的**虚拟指针设备**，`kIOHIDBuiltInKey` 在它们身上全是 nil 所以也没法拿来区分。没有可靠的自动过滤，**所以是用户勾选而不是自动接管**——这不是偷懒，是把无解的分类问题换成一个复选框。
+
+设备身份用 **VID/PID**，不用名字或序列号（重新配对后会变，LinearMouse #764 / #1102）。代价是两只同型号鼠标共用一行，且杂牌占位 ID 可能撞——接受，因为每次重连都丢设置是更糟的失败。
+
+诊断：
+
+```bash
+/usr/bin/log stream --predicate 'subsystem == "com.openmouse.OpenMouse" && category == "pointer"'
+```
+
+自检那组**只覆盖纯逻辑，IOKit 侧零覆盖**——和 HID++ 一样，全绿完全不能说明某只鼠标能用。
+
+## 草稿与保存
+
+设置窗口里「能用身体感觉到」的那几段是**草稿**：改了立刻生效（所以能体验），但只有点右上角「保存」才写盘，直接关窗口会**放弃并恢复**。
+
+分界写在 `DraftSections`（`Model/Settings.swift`）：
+
+- **草稿区** `scroll` / `buttons` / `rules` / `pointer`
+- **即时生效** `enabled`（菜单栏总开关）/ `update`（后台行为）——这两个不是「试用」型设置，藏在一个用户可能从不打开的窗口的保存按钮后面会把它们困死
+- 「登录时启动」「菜单栏图标」压根不进 `Preferences`（直接走 `LoginItem`），天然在体系外，不是特例
+
+机制：`preferences` **始终是实时状态**（这才是改动能被感觉到的原因），草稿靠记住「磁盘现在应该是什么」来跟踪——`SettingsStore.savedDraft` 只在窗口开着时非 nil，`persistedPreferences` 把即时段取实时值、草稿段取上次保存值。**400ms 自动落盘走的也是这个**，否则「只有保存才算数」在重启后就是假话。
+
+`beginEditing()` 在 `SettingsWindowController.show()` 里、窗口创建**之前**调用，保证任何 pane 绑定时已经在会话内。`endEditing()` 在 `windowWillClose` 里放弃未保存改动——这也是未保存的指针速度会弹回去的原因。
+
+**窗口外的改动必须立刻提交**：`resetAll()`（显式的破坏性操作，一半挂在保存按钮后面会让按钮的含义取决于你看哪一段）和状态菜单的 `toggleBypassRule`（菜单动作，不是编辑手势）都走 `commitImmediately()`。所以 `StatusItemController` 调 `store.toggleBypassRule(...)` 而不是直接改 `store.preferences`。
+
+**给 `Preferences` 加字段时必须显式归类。** 自检 `draftSectionsPartitionEveryPreferenceField()` 比对编码出来的顶层键集合与两个显式集合，漏了会直接红——不归类的默认行为是「即时生效」，对一个能被感觉到的设置来说那会悄悄违背保存按钮的承诺。
 
 ## 手势导航
 

@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onOpenSettings: { [weak self] in self?.showSettings() }
         )
         MouseEngine.shared.start()
+        PointerSpeedController.shared.start()
         ConflictMonitor.shared.start()
         KeyboardLayout.startObserving()
         UpdateCoordinator.shared.consumeUpdaterLaunchResult()
@@ -43,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MouseEngine.shared.stop()
+        // Hands every device we changed back to the system value. A quit that left our
+        // acceleration behind would be indistinguishable from macOS itself misbehaving.
+        PointerSpeedController.shared.stop()
         SettingsStore.shared.saveNow()
     }
 
