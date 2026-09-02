@@ -74,11 +74,42 @@ enum PointerSpeed {
 /// Vendor + product ID rather than name or serial number: both of those change when a device is
 /// re-paired or reconnected (LinearMouse #764 / #1102), which would silently orphan the user's
 /// setting. Two accepted costs: two identical mice share one row, and no-name vendors ship
-/// colliding IDs. Losing a setting on every reconnect is the worse failure, and reconnects are
-/// far more common than owning two of the same mouse.
+/// colliding IDs.
+///
+/// The sharper cost, measured on the MCHOSE A5: a multi-mode mouse presents a *different* identity
+/// per connection mode — `0x2023/0xF019` named "MCHOSE A5" over USB, `0x1234/0xFFFF` named
+/// "MCHOSE A5 5.0" over Bluetooth — and pulling the cable switches it over within half a second.
+/// So one physical mouse legitimately occupies two rows. Linking them by name prefix was rejected:
+/// that is exactly the "名字不是证据" trap, and it would apply the user's setting to a device they
+/// never enabled. The UI names the transport instead, so two rows read as two connection modes
+/// rather than as a bug, and enabling both is a one-time action that then persists.
 struct PointerDeviceKey: Equatable, Hashable, Sendable {
     var vendorID: Int
     var productID: Int
+}
+
+/// Which link a device is on. Display only — the same physical mouse changes this when it switches
+/// mode, so it can never be part of identity.
+enum PointerTransport: String, Codable, Equatable, Hashable, Sendable {
+    case usb
+    case bluetooth
+    case other
+
+    /// Maps `kIOHIDTransportKey`, which reports strings like "USB", "Bluetooth Low Energy" and
+    /// "UniversalControl", and is absent entirely on virtual devices.
+    init(ioKitValue: String?) {
+        guard let value = ioKitValue?.lowercased() else {
+            self = .other
+            return
+        }
+        if value.contains("bluetooth") {
+            self = .bluetooth
+        } else if value.contains("usb") {
+            self = .usb
+        } else {
+            self = .other
+        }
+    }
 }
 
 /// One row of the pointer-speed list.
@@ -88,6 +119,10 @@ struct PointerSpeedDevice: Codable, Equatable, Hashable, Sendable, Identifiable 
     /// Display only, never identity. Stored so a row can still name itself while the device is
     /// offline — otherwise a disconnected mouse becomes an anonymous pair of hex numbers.
     var name: String
+    /// Display only, and remembered for the same reason as `name`: with a multi-mode mouse the two
+    /// rows differ only by connection mode, and an offline row that cannot say which mode it is
+    /// leaves the user guessing which of two near-identical names to check.
+    var transport: PointerTransport
     var enabled: Bool
     var acceleration: Double
 
@@ -98,12 +133,14 @@ struct PointerSpeedDevice: Codable, Equatable, Hashable, Sendable, Identifiable 
         vendorID: Int,
         productID: Int,
         name: String,
+        transport: PointerTransport = .other,
         enabled: Bool = false,
         acceleration: Double = PointerSpeed.systemDefault
     ) {
         self.vendorID = vendorID
         self.productID = productID
         self.name = name
+        self.transport = transport
         self.enabled = enabled
         self.acceleration = PointerSpeed.clamped(acceleration)
     }
@@ -112,6 +149,7 @@ struct PointerSpeedDevice: Codable, Equatable, Hashable, Sendable, Identifiable 
         case vendorID
         case productID
         case name
+        case transport
         case enabled
         case acceleration
     }
@@ -137,6 +175,7 @@ struct PointerSpeedDevice: Codable, Equatable, Hashable, Sendable, Identifiable 
             vendorID: vendorID,
             productID: productID,
             name: (try? container.decode(String.self, forKey: .name)) ?? "",
+            transport: (try? container.decode(PointerTransport.self, forKey: .transport)) ?? .other,
             enabled: (try? container.decode(Bool.self, forKey: .enabled)) ?? false,
             acceleration: (try? container.decode(Double.self, forKey: .acceleration))
                 ?? PointerSpeed.systemDefault

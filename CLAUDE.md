@@ -163,10 +163,14 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 
 五条硬性约束，全都踩过：
 
-1. **`IOHIDServiceClient` 是父 `IOHIDEventSystemClient` 会话里的句柄。** 父 client 一释放，service 句柄就是野指针，用它 **SIGSEGV**。client 必须长期持有；service 句柄反过来绝不能跨调用缓存，每次重新枚举。`stop()` 里恢复必须发生在释放 client **之前**。
+1. **client 不能长期持有，service 句柄不能跨调用缓存。** 这是两条互相约束的事实，都实测过：
+   - `IOHIDServiceClient` 是父 `IOHIDEventSystemClient` 会话里的句柄，父 client 一释放，用它就 **SIGSEGV**。所以每次 pass 重新枚举、用完即弃，绝不存下来。
+   - 反过来，client 的 service 列表跨一次拔插会**永久过期**：2026-09-02 实测，一个跨过拔出的 client，`CopyServices` 仍然返回那只设备**已经死掉的 service**（`found=yes` 而每个属性都读 nil），并且**再也不会**出现插回来后的新 service；同一时刻新建的 client 读得毫无问题。**拿同一个 client 重试多少次都不可能恢复。**
+
+   所以做法是：缓存 client（新建一次 1.6 ms vs 复用 0.006 ms，拖滑块是逐格 reconcile，逐格做 IPC 握手会压到和事件 tap 同一条主 run loop 上），但在**设备增删和系统唤醒时作废重建**。另有一条自愈兜底：只要出现「曾经 `.applied` 的设备现在读不到属性」这个签名（`looksStale`），就重建 client 重跑一遍 pass——它是从 v0.7.0 的现场故障里得出来的，有断言钉住。「全部恢复系统默认」按钮强制用新 client：那是人觉得不对劲时才点的按钮，恰是缓存最可能已经不对的时刻。
 2. **必须检查 `IOHIDServiceClientSetProperty` 的 Bool 返回值，还要读回校验。** 返回 true 只说明事件系统收下了消息。LinearMouse 丢掉了这个返回值（`fc305e9` 加过、`2d01c2e` 撤回），它的 Pointer Speed 滑块在这台机器上写了也白写而毫无提示；它 PR #1052 断言 Tahoe 上 "writing still succeeds"，**实测为 false，不要采信**。Apple 正在逐步拆这套属性，所以「写失败」是常规路径。
 3. **`ApplyState` 五种状态不能折叠。** `disabled` / `applied` / `offline` / `unsupported` / `rejected` 各有独立文案，自检钉住这一点。这条是对 HID++ 那个「四种失败在界面上长得一模一样」问题的不重犯。`unsupported` 必须在**未勾选时也上报**——否则复选框是灰的却不说为什么。
-4. **不能启动时设一次。** 鼠标休眠/断开后 service 直接从事件系统消失（实测 service 数 134 → 133）。重新施加的触发是设备增删（`IOServiceAddMatchingNotification` on `IOHIDDevice`，400ms 去抖）、系统唤醒、偏好变化。**用注册表通知而不是 `IOHIDManager`**：后者要 `IOHIDManagerOpen` 打开设备，会把「输入监控」权限拖进一个本来不需要任何权限的功能。
+4. **不能启动时设一次。** 鼠标休眠/断开后 service 直接从事件系统消失（实测 service 数 134 → 133），而且**拔插会把设备的加速值重置回系统默认**，所以重新施加是必要的而不是锦上添花。重新施加的触发是设备增删（`IOServiceAddMatchingNotification` on `IOHIDDevice`）、系统唤醒、偏好变化；前两者都先作废 client（见约束 1）。设备增删后跑一小串 pass（约 0.4 / 1.2 / 3 / 6 秒），所有已勾选设备都 `.applied` 就提前收工——service 不一定在注册表项出现的同一刻就发布。**用注册表通知而不是 `IOHIDManager`**：后者要 `IOHIDManagerOpen` 打开设备，会把「输入监控」权限拖进一个本来不需要任何权限的功能。
 5. **恢复默认值要去读 `IOHIDSystem` 的系统全局值，不能存「启动时抓下来的原值」**（照 LinearMouse `Device.restorePointerAcceleration()`）。存下来的原值在用户改过系统跟踪速度后就是错的。只恢复**我们真正改过**的设备——别的工具可能拥有其他设备的值，「未启用」不等于「可以覆盖」。
 
 **权限：不需要辅助功能。** 2026-09-02 用从未授权过的 debug 包实测，日志 `started trusted=false` 的同时 `applied ... value=0.750000` 成功、读回确认。所以 `PointerSettingsPane` **不放 `PermissionBanner()`**——贴一个与本页无关的权限横幅是误导。`start()` 里那行 `trusted=` 日志刻意保留，用来回答故障报告里「是不是权限问题」。
@@ -174,6 +178,17 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 `ConformsTo(GenericDesktop=1, Mouse=2)` **远不是充分过滤**：本机 135 个 service 里 4 个命中，其中一个是 Kzzi-K75 **键盘**、一个是 Karabiner 的**虚拟指针设备**，`kIOHIDBuiltInKey` 在它们身上全是 nil 所以也没法拿来区分。没有可靠的自动过滤，**所以是用户勾选而不是自动接管**——这不是偷懒，是把无解的分类问题换成一个复选框。
 
 设备身份用 **VID/PID**，不用名字或序列号（重新配对后会变，LinearMouse #764 / #1102）。代价是两只同型号鼠标共用一行，且杂牌占位 ID 可能撞——接受，因为每次重连都丢设置是更糟的失败。
+
+**但更尖锐的代价是三模鼠标：同一只鼠标每种连接方式是一套完全不同的身份。** 2026-09-02 实测 MCHOSE A5：
+
+| 连接 | 名称 | VID/PID |
+|---|---|---|
+| 有线 | `MCHOSE A5` | `0x2023`/`0xF019` |
+| 蓝牙 | `MCHOSE A5 5.0` | `0x1234`/`0xFFFF` |
+
+**拔掉线它不会消失，而是 0.5 秒内切到蓝牙回来**（插回时两个身份会短暂同时存在）。蓝牙那个身份的加速属性同样可读可写，所以这不是「无线下没法用」，纯粹是键值对不上。
+
+**刻意没有按名字前缀把两者认成同一台。** 那正是「名字不是证据」，而且会把用户没勾选的设备的指针速度也改掉。做法是把连接方式（`kIOHIDTransportKey`）作为一等信息显示出来，让两行读起来是「两种连接方式」而不是「一个 bug」，用户把两行都勾上——勾一次就永久记住。`PointerTransport` 只用于显示，永远不能进入身份。
 
 诊断：
 

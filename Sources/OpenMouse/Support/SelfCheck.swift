@@ -240,7 +240,9 @@ enum SelfCheck {
             pointerDeviceListSurvivesSchemaChanges()
             pointerNormalizeDedupesDevices()
             pointerStatesAreDistinguishable()
+            staleClientIsDetectedByLostProperty()
             offlineDeviceKeepsItsRow()
+            multiModeMouseKeepsOneRowPerTransport()
         }
         group("更新检查") {
             hasDefaultUpdateSource()
@@ -3373,14 +3375,51 @@ enum SelfCheck {
         for state in states where state.label != nil && state != .applied(PointerSpeed.systemDefault) {
             expect(state.help != nil, "\(state.label ?? "") 附带可解释原因的说明")
         }
+        // Only one state is the user asking for something and not getting it. "Unsupported" is a
+        // fact about the device — flagging it in alarm colours would demand attention for a device
+        // they most likely do not care about (the list always contains a few).
         expect(
-            PointerSpeedController.ApplyState.unsupported.isProblem
-                && PointerSpeedController.ApplyState.rejected.isProblem,
-            "「不支持」与「被拒绝」被标为需要用户注意"
+            PointerSpeedController.ApplyState.rejected.emphasis == .attention,
+            "「系统拒绝了设置」是唯一需要用户注意的状态"
         )
         expect(
-            !PointerSpeedController.ApplyState.offline.isProblem,
-            "设备只是没连接不算出错"
+            PointerSpeedController.ApplyState.unsupported.emphasis == .muted,
+            "「设备不支持」压低显示，它是设备的属性而不是一次失败的请求"
+        )
+        expect(
+            PointerSpeedController.ApplyState.offline.emphasis == .normal
+                && PointerSpeedController.ApplyState.applied(1.0).emphasis == .normal,
+            "已生效与未连接都是中性事实"
+        )
+    }
+
+    /// Reproduces the hot-plug bug found in v0.7.0: a client held across a replug keeps listing the
+    /// dead service with every property nil, so a working mouse turned permanently `.unsupported`.
+    /// Retrying with the same client can never recover it — only rebuilding can — so the trigger
+    /// for rebuilding has to stay exactly this signature.
+    private static func staleClientIsDetectedByLostProperty() {
+        expect(
+            PointerSpeedController.looksStale(previous: .applied(2.0), current: .unsupported),
+            "曾经施加成功的设备突然读不到属性，判定为 client 视图过期而不是设备不支持"
+        )
+        // A device that never worked is genuinely unsupported; rebuilding the client for it would
+        // turn every pass into a pointless second pass.
+        expect(
+            !PointerSpeedController.looksStale(previous: nil, current: .unsupported),
+            "首次就读不到属性的设备不触发重建"
+        )
+        expect(
+            !PointerSpeedController.looksStale(previous: .unsupported, current: .unsupported),
+            "一直不支持的设备不会每次都触发重建"
+        )
+        // Disconnection has its own state and its own recovery path.
+        expect(
+            !PointerSpeedController.looksStale(previous: .applied(2.0), current: .offline),
+            "设备离线不会被误判成 client 过期"
+        )
+        expect(
+            !PointerSpeedController.looksStale(previous: .applied(2.0), current: .rejected),
+            "写入被拒绝不会被误判成 client 过期"
         )
     }
 
@@ -3389,7 +3428,7 @@ enum SelfCheck {
         let stored = PointerDeviceKey(vendorID: 1_133, productID: 50_504)
         let rows = PointerSpeedController.rows(
             discovered: [
-                .init(key: live, name: "MCHOSE A5", supportsAcceleration: true),
+                .init(key: live, name: "MCHOSE A5", transport: .usb, supportsAcceleration: true),
             ],
             settings: PointerSpeedSettings(devices: [
                 PointerSpeedDevice(
@@ -3409,6 +3448,50 @@ enum SelfCheck {
         expect(
             rows.last?.name == "拔掉的鼠标",
             "离线的一行用存下来的名字，而不是一串十六进制"
+        )
+    }
+
+    /// Documents a decision rather than a mechanism. Measured on the MCHOSE A5: pulling the cable
+    /// switches it to Bluetooth within half a second, under a *different* vendor/product ID and a
+    /// different name. Linking the two by name prefix was rejected — that is the "名字不是证据"
+    /// trap, and it would steer a device the user never enabled — so one physical mouse occupies
+    /// two rows and the transport label is what makes that legible.
+    private static func multiModeMouseKeepsOneRowPerTransport() {
+        let wired = PointerDeviceKey(vendorID: 0x2023, productID: 0xF019)
+        let wireless = PointerDeviceKey(vendorID: 0x1234, productID: 0xFFFF)
+        expect(wired != wireless, "同一只鼠标的有线与无线身份是两个不同的键")
+
+        let rows = PointerSpeedController.rows(
+            discovered: [
+                .init(key: wireless, name: "MCHOSE A5 5.0", transport: .bluetooth, supportsAcceleration: true),
+            ],
+            settings: PointerSpeedSettings(devices: [
+                PointerSpeedDevice(
+                    vendorID: wired.vendorID,
+                    productID: wired.productID,
+                    name: "MCHOSE A5",
+                    transport: .usb,
+                    enabled: true,
+                    acceleration: 1.5
+                ),
+            ])
+        )
+        expect(rows.count == 2, "换连接方式后两个身份各占一行，已配置的那行不会消失")
+        expect(
+            rows.contains { $0.key == wireless && $0.transport == .bluetooth && $0.isLive }
+                && rows.contains { $0.key == wired && $0.transport == .usb && !$0.isLive },
+            "两行分别标出自己的连接方式，否则两个名字几乎一样的行无法区分"
+        )
+        // Transport comes from IOKit strings that vary in wording, so the mapping is pinned here.
+        expect(PointerTransport(ioKitValue: "USB") == .usb, "USB transport 被识别")
+        expect(
+            PointerTransport(ioKitValue: "Bluetooth Low Energy") == .bluetooth,
+            "Bluetooth Low Energy 归入蓝牙而不是落到 other"
+        )
+        expect(PointerTransport(ioKitValue: nil) == .other, "虚拟设备没有 transport，归入 other")
+        expect(
+            Strings.pointerTransportLabel(.other) == nil,
+            "无法判断连接方式时不编一个标签出来"
         )
     }
 }

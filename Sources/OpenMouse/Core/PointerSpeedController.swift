@@ -61,12 +61,24 @@ final class PointerSpeedController {
             }
         }
 
-        /// Distinguishes "nothing is wrong, it just isn't doing anything" from "you asked for
-        /// something and it did not happen".
-        var isProblem: Bool {
+        /// How much visual weight a status deserves. Split out from the states themselves because
+        /// "distinguishable" and "alarming" are different questions: every state must be readable,
+        /// but only one of them is something the user asked for and did not get.
+        enum Emphasis {
+            /// A neutral fact.
+            case normal
+            /// A fact about the device rather than about the user's request — dim it. Orange here
+            /// would demand attention for a device they most likely do not care about.
+            case muted
+            /// The user asked for something and it did not happen.
+            case attention
+        }
+
+        var emphasis: Emphasis {
             switch self {
-            case .unsupported, .rejected: true
-            case .disabled, .applied, .offline: false
+            case .disabled, .applied, .offline: .normal
+            case .unsupported: .muted
+            case .rejected: .attention
             }
         }
 
@@ -84,6 +96,7 @@ final class PointerSpeedController {
     struct Discovered: Identifiable, Equatable, Sendable {
         let key: PointerDeviceKey
         let name: String
+        let transport: PointerTransport
         let supportsAcceleration: Bool
 
         var id: PointerDeviceKey { key }
@@ -93,6 +106,7 @@ final class PointerSpeedController {
     struct Row: Identifiable, Equatable, Sendable {
         let key: PointerDeviceKey
         let name: String
+        let transport: PointerTransport
         let isLive: Bool
         let supportsAcceleration: Bool
 
@@ -107,10 +121,21 @@ final class PointerSpeedController {
     private(set) var states: [PointerDeviceKey: ApplyState] = [:]
     private(set) var isRunning = false
 
-    /// Held for the controller's lifetime. An `IOHIDServiceClient` is a handle into this
-    /// client's session: releasing the client turns every outstanding service handle into a
-    /// dangling pointer, which segfaults rather than failing. Service handles are therefore
-    /// never stored — each pass re-copies them and drops them before returning.
+    /// Cached, and deliberately thrown away on every device change and on wake.
+    ///
+    /// A client's service list goes **permanently** stale across a replug: measured 2026-09-02,
+    /// `CopyServices` on a client held through an unplug keeps returning the *dead* service for
+    /// that device — `found=yes` with every property reading nil — and never surfaces the new one,
+    /// so the mouse looks `.unsupported` forever while a freshly created client reads it fine.
+    /// Retrying with the same client can never recover; only a new client can.
+    ///
+    /// It is cached rather than created per pass because creating one costs ~1.6 ms of IPC against
+    /// 0.006 ms to reuse, and dragging the slider reconciles on every step — on the same run loop
+    /// as the event tap.
+    ///
+    /// An `IOHIDServiceClient` is a handle into its client's session, so service handles are never
+    /// stored anywhere: each pass re-copies them and drops them before returning. That is what
+    /// makes discarding the client safe.
     private var client: IOHIDEventSystemClient?
     private var notifyPort: IONotificationPortRef?
     private var matchedIterator: io_iterator_t = 0
@@ -127,7 +152,6 @@ final class PointerSpeedController {
             reconcile()
             return
         }
-        client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
         isRunning = true
         startDeviceNotifications()
         observeWake()
@@ -166,14 +190,41 @@ final class PointerSpeedController {
     /// The single path that turns preferences into HID writes. Everything — launch, device
     /// arrival, wake, a settings edit — funnels through here so there is one place where the
     /// applied state is decided.
+    ///
+    /// Runs the pass twice at most: a device that was working and now reads nothing means the
+    /// client's view of the event system went stale, not that the mouse changed its mind. Rebuilding
+    /// the client is the only recovery, so it self-heals here rather than relying on having
+    /// enumerated every possible invalidation cause in the trigger list.
     func reconcile() {
-        guard isRunning, let client else { return }
+        guard isRunning else { return }
+        guard applyPass() == .clientLooksStale else { return }
+        Self.log.notice("client view looks stale, rebuilding and retrying")
+        invalidateClient()
+        _ = applyPass()
+    }
+
+    private enum PassOutcome {
+        case settled
+        case clientLooksStale
+    }
+
+    /// True when a device we had successfully applied now reports no readable property at all.
+    /// That is the measured signature of a stale client after a replug — the dead service is still
+    /// listed, with every property nil — and it is not something a real device does on its own.
+    nonisolated static func looksStale(previous: ApplyState?, current: ApplyState) -> Bool {
+        guard case .applied = previous, case .unsupported = current else { return false }
+        return true
+    }
+
+    private func applyPass() -> PassOutcome {
+        let client = activeClient()
         let settings = SettingsStore.shared.preferences
         let masterEnabled = settings.enabled
         let previous = states
 
         var found: [Discovered] = []
         var next: [PointerDeviceKey: ApplyState] = [:]
+        var stale = false
 
         for service in Self.mouseServices(client) {
             guard let key = Self.identity(of: service) else { continue }
@@ -183,6 +234,7 @@ final class PointerSpeedController {
                 Discovered(
                     key: key,
                     name: Self.string(service, kIOHIDProductKey) ?? "",
+                    transport: PointerTransport(ioKitValue: Self.string(service, kIOHIDTransportKey)),
                     supportsAcceleration: current != nil
                 )
             )
@@ -192,7 +244,9 @@ final class PointerSpeedController {
                 // device, and it is the reason the checkbox is unavailable, so it has to be
                 // visible *before* anyone tries to check it.
                 next[key] = .unsupported
-                if previous[key] != .unsupported {
+                if Self.looksStale(previous: previous[key], current: .unsupported) {
+                    stale = true
+                } else if previous[key] != .unsupported {
                     Self.log.notice(
                         "unsupported device vid=\(key.vendorID, privacy: .public) pid=\(key.productID, privacy: .public): \(accelerationKey, privacy: .public) not readable"
                     )
@@ -237,6 +291,18 @@ final class PointerSpeedController {
 
         discovered = found
         states = next
+        return stale ? .clientLooksStale : .settled
+    }
+
+    /// True when nothing is left to wait for, which is what lets the post-replug retry chain stop
+    /// early instead of always running to its end.
+    private var everyEnabledDeviceIsApplied: Bool {
+        let settings = SettingsStore.shared.preferences
+        guard settings.enabled else { return true }
+        for device in settings.pointer.devices where device.enabled {
+            guard case .applied = states[device.key] else { return false }
+        }
+        return true
     }
 
     /// Explicit user escape hatch. Disables every configured device *and* force-writes the
@@ -249,8 +315,10 @@ final class PointerSpeedController {
         for index in SettingsStore.shared.preferences.pointer.devices.indices {
             SettingsStore.shared.preferences.pointer.devices[index].enabled = false
         }
-        guard let client else { return }
-        for service in Self.mouseServices(client) {
+        // Always on a fresh client: this is the button people reach for precisely when things look
+        // wrong, which is when a cached view is most likely to be the thing that is wrong.
+        invalidateClient()
+        for service in Self.mouseServices(activeClient()) {
             let key = Self.accelerationKey(of: service)
             guard Self.integer(service, key) != nil else { continue }
             _ = restore(service, key: key)
@@ -267,11 +335,23 @@ final class PointerSpeedController {
         settings: PointerSpeedSettings
     ) -> [Row] {
         var rows = discovered.map {
-            Row(key: $0.key, name: $0.name, isLive: true, supportsAcceleration: $0.supportsAcceleration)
+            Row(
+                key: $0.key,
+                name: $0.name,
+                transport: $0.transport,
+                isLive: true,
+                supportsAcceleration: $0.supportsAcceleration
+            )
         }
         for device in settings.devices where !rows.contains(where: { $0.key == device.key }) {
             rows.append(
-                Row(key: device.key, name: device.name, isLive: false, supportsAcceleration: false)
+                Row(
+                    key: device.key,
+                    name: device.name,
+                    transport: device.transport,
+                    isLive: false,
+                    supportsAcceleration: false
+                )
             )
         }
         return rows.sorted { lhs, rhs in
@@ -322,7 +402,6 @@ final class PointerSpeedController {
     }
 
     private func restoreEverythingApplied() {
-        guard let client else { return }
         let applied = Set(
             states.compactMap { entry -> PointerDeviceKey? in
                 if case .applied = entry.value { return entry.key }
@@ -330,7 +409,7 @@ final class PointerSpeedController {
             }
         )
         guard !applied.isEmpty else { return }
-        for service in Self.mouseServices(client) {
+        for service in Self.mouseServices(activeClient()) {
             guard let key = Self.identity(of: service), applied.contains(key) else { continue }
             _ = restore(service, key: Self.accelerationKey(of: service))
         }
@@ -410,17 +489,35 @@ final class PointerSpeedController {
         }
     }
 
-    /// One device arriving fans out into several registry entries, and the event system's
-    /// service for a new device can lag its registry entry. A short debounce collapses the
-    /// storm and gives the service time to show up.
+    /// One device arriving fans out into several registry entries, and a replug invalidates the
+    /// cached client outright, so the client is dropped before re-scanning.
+    ///
+    /// The chain of attempts exists because a device's service is not necessarily published the
+    /// instant its registry entry appears. It stops as soon as everything the user enabled is
+    /// applied, so the common case costs one pass.
     private func scheduleRescan() {
         rescanTask?.cancel()
+        // Logged unconditionally: when this feature failed in the field, the first unanswerable
+        // question was whether the notification had fired at all.
+        Self.log.notice("device change, rescanning")
         rescanTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(400))
-            guard !Task.isCancelled else { return }
-            self?.reconcile()
+            for delay in Self.rescanDelays {
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled, let self, self.isRunning else { return }
+                self.invalidateClient()
+                self.reconcile()
+                if self.everyEnabledDeviceIsApplied { return }
+            }
         }
     }
+
+    /// Intervals between attempts, i.e. roughly 0.4s / 1.2s / 3s / 6s after the device event.
+    private static let rescanDelays: [Duration] = [
+        .milliseconds(400),
+        .milliseconds(800),
+        .milliseconds(1_800),
+        .seconds(3),
+    ]
 
     private func observeWake() {
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -428,7 +525,12 @@ final class PointerSpeedController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reconcile() }
+            MainActor.assumeIsolated {
+                // Sleep can retire and republish services without a registry notification we
+                // subscribed to, so the client is assumed stale here too.
+                self?.invalidateClient()
+                self?.reconcile()
+            }
         }
     }
 
@@ -446,6 +548,19 @@ final class PointerSpeedController {
     }
 
     // MARK: Event system access
+
+    private func activeClient() -> IOHIDEventSystemClient {
+        if let client { return client }
+        let created = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+        client = created
+        return created
+    }
+
+    /// Drops the cached client so the next pass builds one that can actually see the current
+    /// devices. Safe at any point because no service handle is ever stored.
+    private func invalidateClient() {
+        client = nil
+    }
 
     /// Conforming to GenericDesktop/Mouse is a necessary but nowhere near sufficient filter: on
     /// this machine it also matches a keyboard and Karabiner's virtual pointing device, and

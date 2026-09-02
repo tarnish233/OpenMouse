@@ -137,6 +137,15 @@ enum Strings {
         + "勾选要接管的设备——列表里也会出现键盘和虚拟设备，系统没有可靠的办法把它们区分开，所以由你来选。"
     static let pointerCurveNote = "这里调的是加速曲线，不是硬件 DPI：快速甩动被放大的比例比慢速微调更大。"
         + "在「系统设置 › 鼠标 › 跟踪速度」拖动后，系统会覆盖这里的值，重新插拔设备或改动本页会再次生效。"
+    static let pointerMultiModeNote = "三模鼠标在有线和无线下会被系统报成两台不同的设备（名称与 ID 都不一样），因此会占两行。"
+        + "想让它换连接方式后手感不变，把两行都勾上——勾一次就会一直记住。"
+    static func pointerTransportLabel(_ transport: PointerTransport) -> String? {
+        switch transport {
+        case .usb: "有线"
+        case .bluetooth: "蓝牙"
+        case .other: nil
+        }
+    }
     static let pointerEmpty = "没有找到可调整的指针设备"
     static let pointerEmptyBody = "连接一只鼠标后它会出现在这里。触控板不在此列——它已经是像素级连续输入。"
     static let pointerRestoreDefaults = "全部恢复系统默认"

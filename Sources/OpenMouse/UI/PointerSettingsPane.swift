@@ -48,6 +48,7 @@ struct PointerSettingsPane: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(Strings.pointerIntro)
+                    Text(Strings.pointerMultiModeNote)
                     Text(Strings.pointerCurveNote)
                 }
                 .font(.caption)
@@ -85,8 +86,11 @@ struct PointerSettingsPane: View {
                     store.preferences.pointer.devices[index].enabled = isOn
                     // Refresh the remembered name while the device is here to be named; it is
                     // the only thing that identifies the row once it goes offline.
-                    if !row.name.isEmpty {
-                        store.preferences.pointer.devices[index].name = row.name
+                    if row.isLive {
+                        if !row.name.isEmpty {
+                            store.preferences.pointer.devices[index].name = row.name
+                        }
+                        store.preferences.pointer.devices[index].transport = row.transport
                     }
                 } else if isOn {
                     store.preferences.pointer.devices.append(
@@ -94,6 +98,7 @@ struct PointerSettingsPane: View {
                             vendorID: row.key.vendorID,
                             productID: row.key.productID,
                             name: row.name,
+                            transport: row.transport,
                             enabled: true
                         )
                     )
@@ -138,6 +143,24 @@ private struct PointerDeviceRow: View {
         !row.isLive || row.supportsAcceleration
     }
 
+    /// An *unchecked* absent device has no apply state to report, so it would otherwise be
+    /// distinguishable from a connected one by dimming alone. Colour is never the only carrier of
+    /// a fact here — it has to survive a screenshot, a colour-blind reader, and a bright room.
+    private var statusLabel: String? {
+        state.label ?? (row.isLive ? nil : Strings.pointerStateOffline)
+    }
+
+    private var statusStyle: AnyShapeStyle {
+        // The fallback label describes an absent device, which is the same kind of fact as
+        // "unsupported": worth stating, not worth alarming about.
+        guard state.label != nil else { return AnyShapeStyle(.tertiary) }
+        switch state.emphasis {
+        case .normal: return AnyShapeStyle(.secondary)
+        case .muted: return AnyShapeStyle(.tertiary)
+        case .attention: return AnyShapeStyle(.orange)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // The state text sits *before* the switch so every switch lands on the same right
@@ -146,18 +169,24 @@ private struct PointerDeviceRow: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name.isEmpty ? Strings.pointerUnnamedDevice : row.name)
-                    Text(Strings.pointerDeviceIdentity(row.key.vendorID, row.key.productID))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(row.isLive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    HStack(spacing: 6) {
+                        if let transport = Strings.pointerTransportLabel(row.transport) {
+                            Text(transport)
+                        }
+                        Text(Strings.pointerDeviceIdentity(row.key.vendorID, row.key.productID))
+                            .monospacedDigit()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(row.isLive ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary))
                 }
 
                 Spacer(minLength: 8)
 
-                if let label = state.label {
+                if let label = statusLabel {
                     Text(label)
                         .font(.caption)
-                        .foregroundStyle(state.isProblem ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(statusStyle)
                         // Never let the switch squeeze this: a half-clipped reason is worse than
                         // no reason, because it looks like a rendering glitch instead of a state.
                         .lineLimit(1)
