@@ -37,6 +37,35 @@ enum UpdatePolicy {
               release.version == skippedVersion else { return nil }
         return release
     }
+
+    /// Whether a finished check should retire the post-install notice.
+    ///
+    /// The outcome row renders `installationState` ahead of the check result, and the relaunch after
+    /// an in-app update sets it to `.installed(version)` with nothing ever resetting it. So the
+    /// "已更新到 X" banner masked every later finding — including the install button for a newer
+    /// release — which meant **in-app updating disabled itself after its first successful use**.
+    /// Observed on 0.7.0 → 0.7.1: the check ran and found 0.7.1 (the "上次检查" timestamp advanced)
+    /// while the UI kept saying 已更新到 0.7.0.
+    ///
+    /// Retired when the result is something the user must be able to act on, or when they asked for
+    /// this check themselves. An *automatic* check that merely confirms "still current" leaves the
+    /// notice alone, so the confirmation does not vanish a second after the update that earned it.
+    static func shouldRetireInstallationNotice(
+        state: UpdateCoordinator.InstallationState,
+        result: UpdateChecker.Outcome,
+        userInitiated: Bool
+    ) -> Bool {
+        switch state {
+        // Nothing to retire, or an install is still in flight and owns the row.
+        case .idle, .downloading, .installing:
+            return false
+        case .installed, .failed:
+            break
+        }
+        if userInitiated { return true }
+        if case .available = result { return true }
+        return false
+    }
 }
 
 /// Owns update-check state for the UI: what the last check found, whether one is in flight,
@@ -199,6 +228,13 @@ final class UpdateCoordinator {
         )
         outcome = result
         isChecking = false
+        if UpdatePolicy.shouldRetireInstallationNotice(
+            state: installationState,
+            result: result,
+            userInitiated: userInitiated
+        ) {
+            installationState = .idle
+        }
 
         // Only a completed, comparable round trip counts, so a network/parse/version failure
         // does not silence the next automatic check for a whole day.

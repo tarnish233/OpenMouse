@@ -255,6 +255,7 @@ enum SelfCheck {
             parsesReleaseRedirect()
             constructsReleaseArchiveURL()
             rejectsUnexpectedReleaseURLs()
+            installNoticeDoesNotMaskLaterFindings()
         }
 
         print("")
@@ -3113,6 +3114,73 @@ enum SelfCheck {
         expect(
             UpdateChecker.release(from: releasesIndex, repository: "owner/repo") == nil,
             "没有版本标签的发布列表不会被误解析"
+        )
+    }
+
+    /// Reproduces the 0.7.0 → 0.7.1 report: the app had updated in place once, so the outcome row
+    /// was pinned on 「已更新到 0.7.0」 and every later check — including one that found 0.7.1 —
+    /// was invisible. In-app updating had disabled itself after its first successful use.
+    private static func installNoticeDoesNotMaskLaterFindings() {
+        guard let page = URL(string: "https://github.com/owner/repo/releases/tag/v0.7.1") else {
+            expect(false, "测试发布地址有效")
+            return
+        }
+        let newer = UpdateChecker.Outcome.available(
+            UpdateChecker.Release(version: "0.7.1", url: page)
+        )
+        let current = UpdateChecker.Outcome.upToDate(current: "0.7.0")
+
+        expect(
+            UpdatePolicy.shouldRetireInstallationNotice(
+                state: .installed("0.7.0"),
+                result: newer,
+                userInitiated: false
+            ),
+            "自动检查发现新版本时，安装成功的提示必须让位，否则新版本无法被安装"
+        )
+        expect(
+            UpdatePolicy.shouldRetireInstallationNotice(
+                state: .installed("0.7.0"),
+                result: current,
+                userInitiated: true
+            ),
+            "用户主动点检查时看到的是这次检查的结果，而不是上次安装的旧提示"
+        )
+        // Otherwise the confirmation earned by an update would vanish a second later, when the
+        // scheduled check confirms the version it just installed.
+        expect(
+            !UpdatePolicy.shouldRetireInstallationNotice(
+                state: .installed("0.7.0"),
+                result: current,
+                userInitiated: false
+            ),
+            "自动检查只确认「已是最新」时，保留刚才那次安装成功的提示"
+        )
+        // An install in flight owns the row; a check must not steal it mid-download.
+        expect(
+            !UpdatePolicy.shouldRetireInstallationNotice(
+                state: .downloading("0.7.1"),
+                result: newer,
+                userInitiated: true
+            ),
+            "正在下载时不会被检查结果顶掉"
+        )
+        expect(
+            !UpdatePolicy.shouldRetireInstallationNotice(
+                state: .idle,
+                result: newer,
+                userInitiated: true
+            ),
+            "本来就没有提示时不做多余的状态变更"
+        )
+        // A failed install keeps its retry affordance until something actionable replaces it.
+        expect(
+            UpdatePolicy.shouldRetireInstallationNotice(
+                state: .failed("装不上"),
+                result: newer,
+                userInitiated: false
+            ),
+            "安装失败的提示也不能挡住后来发现的新版本"
         )
     }
 

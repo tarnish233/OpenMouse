@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 393 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
+make test     # 应用自检 416 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -114,7 +114,7 @@ main.swift ──▶ AppDelegate ──▶ StatusItemController（菜单栏）
                     └─▶ SettingsWindowController ──▶ SwiftUI 设置界面
 
 AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（不碰事件 tap）
-                    ├─▶ IOHIDEventSystemClient      长期持有，service 句柄不缓存
+                    ├─▶ IOHIDEventSystemClient      设备增删/唤醒时作废重建（见约束 1）
                     └─▶ IOServiceAddMatchingNotification  设备增删触发重新施加
 ```
 
@@ -294,6 +294,10 @@ TCC 通过 bundle id 与 Designated Requirement 识别同一应用。`v0.4.0` �
 ad-hoc 包永远不可能自动更新——它的 DR 是每次构建都变的 CDHash，下一个版本不可能满足。`v0.6.1` 及更早的用户必须手动装一次。
 
 `UpdateHandoff`（`OpenMouseUpdateSupport`）里两个超时的**顺序**是不变量：宿主 12s 放弃等待自身退出，助手 30s 放弃等待宿主。宿主必须先认输，否则 `installationState` 卡在 `.installing`、`isBusy` 恒真，`reconcileAutomaticSchedule` / `launchAutomaticCheck` / `check` 三处 guard 全部短路——整个进程生命周期内更新检查彻底死掉，界面还留着转圈。`NSApp.terminate` 是请求不是保证，兜底定时器必须挂在 `.common` 模式，否则模态循环里不触发。
+
+**`installationState` 不只会卡住检查，还会挡住检查结果。** `GeneralSettingsPane` 的 `outcomeRow` 先 switch `installationState`，只有 `.idle` 才落到 `checkOutcomeRow`。更新后重启时 `consumeUpdaterLaunchResult()` 把它设成 `.installed(version)`，而 v0.7.1 之前**没有任何地方复位它**——于是「已更新到 X」永久占住那一行，后续检查发现的新版本连带安装按钮一起看不见，**应用内更新在第一次成功使用后自我禁用**（0.7.0 → 0.7.1 现场复现：检查跑了、发现了 0.7.1、「上次检查」时间也更新了，界面仍写着已更新到 0.7.0）。规则收在 `UpdatePolicy.shouldRetireInstallationNotice`：发现新版本、或用户主动点检查 ⇒ 让位；**自动检查只确认「已是最新」时保留**，否则刚装完一秒后定时检查一跑，那句确认就凭空消失。断言两个方向都钉，只钉一边很容易过度修成把确认也弄没了。
+
+这一类 bug 的教训：更新相关的断言原本 10 条全在测网络解析与调度，**没有一条测结果到不到得了用户眼前**。
 
 安装位置在**下载之前**检查（`ApplicationReplacement.locationProblem`）：App Translocation 只读副本按路径含 `AppTranslocation` 识别（`SecTranslocateIsTranslocatedURL` 没有 Swift 绑定），容器不可写另算一种。没有任何更新包能让只读位置变可写，所以先花流量再失败是纯浪费。
 
