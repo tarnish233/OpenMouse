@@ -45,15 +45,6 @@ struct PointerSettingsPane: View {
                 }
             } header: {
                 Text(Strings.pointerSectionTitle)
-            } footer: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(Strings.pointerIntro)
-                    Text(Strings.pointerMultiModeNote)
-                    Text(Strings.pointerCurveNote)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             }
 
             Section {
@@ -61,11 +52,6 @@ struct PointerSettingsPane: View {
                     controller.restoreSystemDefaults()
                 }
                 .disabled(rows.isEmpty)
-            } footer: {
-                Text(Strings.pointerRestoreDefaultsHelp)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)

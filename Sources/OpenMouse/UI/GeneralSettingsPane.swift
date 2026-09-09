@@ -74,10 +74,6 @@ struct GeneralSettingsPane: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                Text(Strings.generalCredits)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             UpdateSection()
@@ -210,16 +206,8 @@ private struct UpdateSection: View {
 
     var body: some View {
         Section {
-            Toggle(isOn: $store.preferences.update.checkAutomatically) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(Strings.updateAuto)
-                    Text(Strings.updateAutoHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .toggleStyle(.switch)
+            Toggle(Strings.updateAuto, isOn: $store.preferences.update.checkAutomatically)
+                .toggleStyle(.switch)
 
             HStack(spacing: 10) {
                 Button(updates.isChecking ? Strings.updateChecking : Strings.updateCheckNow) {

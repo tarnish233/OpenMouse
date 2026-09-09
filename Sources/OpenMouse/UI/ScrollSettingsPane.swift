@@ -13,10 +13,8 @@ struct ScrollSettingsPane: View {
             PermissionBanner()
 
             Section(Strings.scrollSectionBasics) {
-                Toggle(isOn: scroll.smoothingEnabled) {
-                    LabelWithHelp(Strings.scrollEnableSmoothing, help: Strings.scrollEnableSmoothingHelp)
-                }
-                .toggleStyle(.switch)
+                Toggle(Strings.scrollEnableSmoothing, isOn: scroll.smoothingEnabled)
+                    .toggleStyle(.switch)
 
                 Toggle(Strings.scrollReverseVertical, isOn: scroll.reverseVertical)
                     .toggleStyle(.switch)
