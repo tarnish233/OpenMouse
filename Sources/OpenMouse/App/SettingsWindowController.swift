@@ -145,6 +145,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.activationObserver = nil
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        SettingsLeaveConfirmation.confirm()
+    }
+
     func windowWillClose(_ notification: Notification) {
         stopWaitingForActivation()
         MouseEngine.shared.endButtonCapture()

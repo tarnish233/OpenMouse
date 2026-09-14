@@ -41,8 +41,12 @@ enum Strings {
     // Window / tabs
     static let settingsTitle = "Open Mouse 设置"
     static let settingsSave = "保存"
+    static let settingsUnsavedTitle = "要保存对设置的更改吗？"
+    static let settingsUnsavedMessage = "当前有尚未保存的修改。选择“不保存”会恢复上次保存的配置；选择“取消”可继续编辑。"
+    static let settingsDontSave = "不保存"
+    static let settingsLeaveCancel = "取消"
     static let settingsSaved = "已保存"
-    static let settingsSaveHelp = "改动已经在生效，可以先体验。点击保存才会写入配置；直接关闭窗口会放弃并恢复。"
+    static let settingsSaveHelp = "改动已经在生效，可以先体验。点击保存才会写入配置；离开页面或关闭窗口时会提示保存。"
     static let settingsSavedHelp = "没有未保存的改动。"
     static let settingsRevert = "撤销"
     static let settingsRevertHelp = "放弃全部未保存的改动，立刻回到上次保存的状态。不是逐步撤销。"

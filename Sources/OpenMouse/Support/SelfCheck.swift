@@ -176,6 +176,7 @@ enum SelfCheck {
             activationLeaseIsIdempotent()
             applicationMenuProvidesStandardShortcuts()
             settingsWindowWaitsForActivationBeforeOrderingFront()
+            settingsLeaveRequiresExplicitDecision()
             versionFallbackIsHonest()
             debugPreferencesAreIsolated()
             statusItemPresentationTracksRuntimeState()
@@ -1891,6 +1892,26 @@ enum SelfCheck {
     private static func recursiveMenuItems(in menu: NSMenu) -> [NSMenuItem] {
         menu.items + menu.items.flatMap { item in
             item.submenu.map(recursiveMenuItems(in:)) ?? []
+        }
+    }
+
+    private static func settingsLeaveRequiresExplicitDecision() {
+        MainActor.assumeIsolated {
+            var saves = 0
+            var discards = 0
+            @MainActor func resolve(_ response: NSApplication.ModalResponse) -> Bool {
+                SettingsLeaveConfirmation.resolve(
+                    response, save: { saves += 1 }, discard: { discards += 1 }
+                )
+            }
+            expect(resolve(.alertFirstButtonReturn) && saves == 1 && discards == 0,
+                   "离开时选择保存：提交修改并允许离开")
+            expect(resolve(.alertSecondButtonReturn) && saves == 1 && discards == 1,
+                   "离开时选择不保存：恢复配置并允许离开")
+            expect(!resolve(.alertThirdButtonReturn) && saves == 1 && discards == 1,
+                   "离开时选择取消：不保存、不撤销且留在原页面")
+            expect(!resolve(.abort) && saves == 1 && discards == 1,
+                   "提示被中断时默认留在原页面，不丢弃修改")
         }
     }
 

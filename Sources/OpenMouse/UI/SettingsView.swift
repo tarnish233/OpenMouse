@@ -38,7 +38,20 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 @Observable
 final class SettingsNavigation {
     static let shared = SettingsNavigation()
-    var selectedTab: SettingsTab? = .scroll
+    var selectedTab: SettingsTab? {
+        get { currentTab }
+        set { _ = select(newValue) }
+    }
+    private var currentTab: SettingsTab? = .scroll
+
+    @discardableResult
+    func select(_ tab: SettingsTab?) -> Bool {
+        guard let tab, tab != currentTab else { return false }
+        guard SettingsLeaveConfirmation.confirm() else { return false }
+        currentTab = tab
+        return true
+    }
+
     private init() {}
 }
 
@@ -99,21 +112,23 @@ struct SettingsView: View {
     private func goBack() {
         guard historyIndex > 0 else { return }
         isHistoryNavigation = true
-        historyIndex -= 1
-        navigation.selectedTab = history[historyIndex]
+        if navigation.select(history[historyIndex - 1]) {
+            historyIndex -= 1
+        }
         Task { @MainActor in isHistoryNavigation = false }
     }
 
     private func goForward() {
         guard historyIndex < history.count - 1 else { return }
         isHistoryNavigation = true
-        historyIndex += 1
-        navigation.selectedTab = history[historyIndex]
+        if navigation.select(history[historyIndex + 1]) {
+            historyIndex += 1
+        }
         Task { @MainActor in isHistoryNavigation = false }
     }
 
     private func record() {
-        guard !isHistoryNavigation, let tab = navigation.selectedTab, history.last != tab else { return }
+        guard !isHistoryNavigation, let tab = navigation.selectedTab, history[historyIndex] != tab else { return }
         if historyIndex < history.count - 1 {
             history = Array(history.prefix(historyIndex + 1))
         }
@@ -196,9 +211,7 @@ private struct EngineStatusFooter: View {
 
 // MARK: - Save
 
-/// Closing the window discards, so the button has to be the thing that says "there is something
-/// here to lose". Prominent and enabled while dirty, plain and disabled once everything is saved —
-/// a button that looks identical in both states would make silent discard feel like data loss.
+/// Keep the pending-save state visible even before the user tries to leave the page.
 private struct SaveButton: View {
     let hasUnsavedChanges: Bool
     let action: () -> Void

@@ -42,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return SettingsTab(rawValue: args[index + 1])
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        SettingsLeaveConfirmation.confirm() ? .terminateNow : .terminateCancel
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MouseEngine.shared.stop()
         // Hands every device we changed back to the system value. A quit that left our
