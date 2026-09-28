@@ -153,7 +153,7 @@ struct SettingsView: View {
                 Button(Strings.settingsRevert) { store.discardEdits() }
                     .disabled(!store.hasUnsavedChanges)
                     .help(Strings.settingsRevertHelp)
-                SaveButton(hasUnsavedChanges: store.hasUnsavedChanges) {
+                SaveButton(state: store.saveState) {
                     store.saveEdits()
                 }
             }
@@ -235,22 +235,35 @@ private struct EngineStatusFooter: View {
 
 // MARK: - Save
 
-/// Keep the pending-save state visible even before the user tries to leave the page.
+/// A clean draft is not a save confirmation. Only an explicit save in the current
+/// editing session earns "已保存"; reopening or reverting returns to disabled "保存".
 private struct SaveButton: View {
-    let hasUnsavedChanges: Bool
+    let state: SettingsStore.SaveState
     let action: () -> Void
 
     var body: some View {
-        if hasUnsavedChanges {
-            Button(Strings.settingsSave, action: action)
-                .buttonStyle(.borderedProminent)
-                .help(Strings.settingsSaveHelp)
-                .keyboardShortcut("s", modifiers: .command)
+        if state == .modified {
+            button.buttonStyle(.borderedProminent)
         } else {
-            Label(Strings.settingsSaved, systemImage: "checkmark")
-                .labelStyle(.titleAndIcon)
-                .foregroundStyle(.secondary)
-                .help(Strings.settingsSavedHelp)
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    private var button: some View {
+        Button(action: action) {
+            Text(state == .saved ? Strings.settingsSaved : Strings.settingsSave)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .disabled(state != .modified)
+        .help(help)
+        .keyboardShortcut("s", modifiers: .command)
+    }
+
+    private var help: String {
+        switch state {
+        case .unchanged: Strings.settingsUnchangedHelp
+        case .modified: Strings.settingsSaveHelp
+        case .saved: Strings.settingsSavedHelp
         }
     }
 }

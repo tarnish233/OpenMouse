@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 535 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
+make test     # 应用自检 554 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -213,6 +213,8 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 ## 草稿与保存
 
 设置窗口里「能用身体感觉到」的那几段是**草稿**：改了立刻生效（所以能体验），但只有点右上角「保存」才写盘，切换设置页、关闭窗口或退出应用前会提示**保存 / 不保存 / 取消**；只有明确选择不保存才放弃并恢复。
+
+保存按钮区分三态：刚打开或撤销后显示不可用的「保存」，有草稿时显示可用的「保存」，只有本次编辑会话明确保存后才显示「已保存」（纯文字，不加勾图标）。不能把 `!hasUnsavedChanges` 当作已保存反馈；即时设置自动落盘也不算手动保存，关闭再打开必须重置反馈。
 
 分界写在 `DraftSections`（`Model/Settings.swift`）：
 

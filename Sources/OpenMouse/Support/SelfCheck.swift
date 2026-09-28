@@ -241,6 +241,7 @@ enum SelfCheck {
             draftSectionsPartitionEveryPreferenceField()
             savingKeepsImmediateSectionsLive()
             discardingRestoresOnlyDraftSections()
+            saveFeedbackRequiresExplicitSave()
         }
         group("设置页异步元数据") {
             settingsMetadataCacheCoalescesAndExpires()
@@ -3577,8 +3578,80 @@ enum SelfCheck {
         expect(reverted.enabled == false, "放弃草稿不会把已经生效的总开关一起回滚")
         expect(
             DraftSections(reverted) == baseline,
-            "放弃之后草稿区与上次保存的状态一致，保存按钮回到「已保存」"
+            "放弃之后草稿区与上次保存的状态一致，不再有待保存修改"
         )
+    }
+
+    private static func saveFeedbackRequiresExplicitSave() {
+        MainActor.assumeIsolated {
+            let folder = FileManager.default.temporaryDirectory
+                .appendingPathComponent("openmouse-save-feedback-\(UUID().uuidString)")
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let file = folder.appendingPathComponent("preferences.json")
+                let store = SettingsStore(preferences: Preferences(), fileURL: file)
+                defer {
+                    store.endEditing()
+                    try? FileManager.default.removeItem(at: folder)
+                }
+                expect(store.saveState == .unchanged, "初始状态不将加载配置冒充已保存")
+                store.beginEditing()
+                expect(store.saveState == .unchanged, "首次打开设置显示不可用的保存，而不是已保存")
+                store.preferences.enabled.toggle()
+                store.preferences.update.checkAutomatically.toggle()
+                store.saveNow()
+                expect(store.saveState == .unchanged, "即时设置和自动落盘不产生明确保存反馈")
+                store.saveEdits()
+                expect(store.saveState == .unchanged, "没有草稿时调用保存也不冒充刚刚保存过")
+
+                let originalSpeed = store.preferences.scroll.speed
+                store.preferences.scroll.speed = originalSpeed + 1
+                expect(store.saveState == .modified && store.hasUnsavedChanges, "修改草稿后启用保存")
+                store.beginEditing()
+                expect(store.saveState == .modified, "重复展示同一窗口不重置草稿会话")
+                store.saveEdits()
+                expect(store.saveState == .saved && !store.hasUnsavedChanges, "明确保存后才显示已保存")
+                let persisted = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: file))
+                expectClose(persisted.scroll.speed, originalSpeed + 1, "明确保存确实写入当前草稿")
+                store.beginEditing()
+                expect(store.saveState == .saved, "同一会话内重新聚焦窗口保留已有保存反馈")
+                store.preferences.enabled.toggle()
+                store.saveNow()
+                expect(store.saveState == .saved, "即时设置不抹去本次草稿的明确保存记录")
+
+                store.preferences.scroll.speed = originalSpeed + 2
+                expect(store.saveState == .modified, "保存后再次修改立即恢复待保存状态")
+                store.preferences.scroll.speed = originalSpeed + 1
+                expect(store.saveState == .unchanged, "手动改回原值不是一次新的保存")
+                store.preferences.scroll.speed = originalSpeed + 3
+                store.discardEdits()
+                expect(store.saveState == .unchanged && !store.hasUnsavedChanges, "撤销改动后不显示已保存")
+                store.preferences.scroll.speed = originalSpeed + 2
+                store.saveEdits()
+                expect(store.saveState == .saved, "重新修改并保存可再次显示已保存")
+                store.discardEdits()
+                expect(store.saveState == .unchanged, "撤销入口即使没有草稿也清除旧保存反馈")
+                store.preferences.scroll.speed = originalSpeed + 3
+                store.saveEdits()
+                store.endEditing()
+                store.beginEditing()
+                expect(store.saveState == .unchanged, "关闭后重新打开窗口不继承上次已保存提示")
+
+                store.preferences.scroll.speed = originalSpeed + 4
+                store.endEditing()
+                store.beginEditing()
+                expect(store.saveState == .unchanged && !store.hasUnsavedChanges,
+                       "结束未保存会话后重开也不显示保存成功")
+                expectClose(store.preferences.scroll.speed, originalSpeed + 3, "结束会话仍按原逻辑恢复草稿")
+                store.preferences.scroll.speed = originalSpeed + 5
+                store.saveEdits()
+                store.resetAll()
+                expect(store.saveState == .unchanged, "立即提交的恢复默认操作不冒充手动保存")
+            } catch {
+                expect(false, "保存反馈隔离测试失败：\(error)")
+                try? FileManager.default.removeItem(at: folder)
+            }
+        }
     }
 
     // MARK: 指针速度

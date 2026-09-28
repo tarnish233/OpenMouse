@@ -10,6 +10,12 @@ final class SettingsStore {
     nonisolated static let debugBundleIdentifier = "com.openmouse.OpenMouse.debug"
     static let shared = SettingsStore()
 
+    enum SaveState: Equatable {
+        case unchanged
+        case modified
+        case saved
+    }
+
     /// Debug bundles must never share the production preferences file. Besides keeping test data
     /// disposable, this prevents a stale test process from overwriting the user's real mappings.
     nonisolated static func applicationSupportFolderName(bundleIdentifier: String?) -> String {
@@ -19,6 +25,9 @@ final class SettingsStore {
     var preferences: Preferences {
         didSet {
             guard preferences != oldValue else { return }
+            if DraftSections(preferences) != DraftSections(oldValue) {
+                hasExplicitlySavedEdits = false
+            }
             scrollRules.updatePreferences(preferences)
             scheduleSave()
             refreshSnapshot()
@@ -35,6 +44,15 @@ final class SettingsStore {
     /// `preferences` always stays the live state — that is what makes an unsaved change something
     /// you can actually feel — so the draft is tracked by remembering what disk should still say.
     private(set) var savedDraft: DraftSections?
+
+    /// An acknowledgement of an explicit save in this editing session, not a synonym
+    /// for having no draft. Loading, autosaving immediate settings and reverting do not count.
+    private var hasExplicitlySavedEdits = false
+
+    var saveState: SaveState {
+        if hasUnsavedChanges { return .modified }
+        return hasExplicitlySavedEdits ? .saved : .unchanged
+    }
 
     var hasUnsavedChanges: Bool {
         guard let savedDraft else { return false }
@@ -73,6 +91,14 @@ final class SettingsStore {
         // Materialise the file on first launch so "显示配置文件" always has something to
         // reveal, and so the defaults are visible and editable by hand.
         if existing == nil { saveNow() }
+    }
+
+    /// Isolated store for diagnostics: no workspace observers, global preferences or engine.
+    init(preferences: Preferences, fileURL: URL) {
+        self.preferences = preferences
+        self.fileURL = fileURL
+        scrollRules.updatePreferences(preferences)
+        refreshSnapshot()
     }
 
     // MARK: Frontmost app tracking
@@ -161,18 +187,22 @@ final class SettingsStore {
     /// Idempotent: reopening the window must not adopt the current draft as the saved state.
     func beginEditing() {
         guard savedDraft == nil else { return }
+        hasExplicitlySavedEdits = false
         savedDraft = DraftSections(preferences)
     }
 
     func saveEdits() {
+        guard hasUnsavedChanges else { return }
         savedDraft = DraftSections(preferences)
         saveNow()
+        hasExplicitlySavedEdits = true
     }
 
     /// Puts the live state back to what was last saved. Assigning `preferences` is what makes the
     /// revert perceptible — the tap snapshot and the pointer controller both follow it — so a
     /// discarded pointer speed springs back rather than lingering until relaunch.
     func discardEdits() {
+        hasExplicitlySavedEdits = false
         guard let savedDraft, hasUnsavedChanges else { return }
         preferences = savedDraft.applied(to: preferences)
     }
@@ -208,6 +238,7 @@ final class SettingsStore {
     /// Folds the current live state into the saved baseline, so a mutation made outside the
     /// settings window is not left looking like an unsaved edit.
     private func commitImmediately() {
+        hasExplicitlySavedEdits = false
         if savedDraft != nil { savedDraft = DraftSections(preferences) }
         saveNow()
     }
