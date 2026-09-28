@@ -56,6 +56,7 @@ struct ButtonsSettingsPane: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 8, for: .scrollContent)
+        // Render the engine's cached DPI immediately; a stale value is refreshed asynchronously.
         .onAppear { engine.refreshLogitechDPI() }
         .sheet(isPresented: $isRecording) {
             ButtonRecorderSheet { press in

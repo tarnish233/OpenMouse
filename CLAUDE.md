@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 462 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
+make test     # 应用自检 535 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -150,6 +150,12 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 - **单独绑定的“左右切换桌面”动作保留节流。** `SpaceSwitchPacer`：0.12s 间隔（Mos 同值），最多积压 2 步，反向时丢弃积压。**手势导航必须绕过 pacer**：2026-08-31 对 `logioptionsplus_agent` 的直接事件采样显示，它在每次物理按住的第一次方向锁定时立即发一次 `Control+Fn+Left/Right Arrow`，即使前一段桌面动画还在运行也不排队。
 - **媒体键不是键码**，走 `NSEvent.otherEvent(with: .systemDefined, subtype: 8)` + `NX_KEYTYPE_*` 装在 `data1`。
 - **功能行键码要一个个实测**：`160` = 调度中心、`131` = 启动台、`178` = 控制中心，在 macOS 26.6 上验证有效。`177`（聚焦）与 `176`（听写）实测**已失效**，故意没收入——宁可没有这一项，不要一个选得到但不动的选项。注意 Mos 的标识符 `appExpose` 看名字像「应用程序窗口」，但它界面上写的是「启动台」；名字不是证据，日志才是。
+
+## 设置页性能
+
+不能在 SwiftUI `body`、`@State` 初始化或切页 `onAppear` 中同步查设备、查登录项或读取应用图标。按键页 DPI 使用会话级缓存及异步 HID 报告；指针页只显示长期控制器快照，热插拔/唤醒走有限重试窗口；应用图标和诊断 PID 名称由 `SettingsApplicationMetadata` 在串行 utility 队列加载。缓存必须区分缺失结果和未加载、合并在途请求、拒绝失效后的旧回调，并有容量/生命周期边界；不缓存用户草稿副本。
+
+登录项只有状态读取移到后台，主动 register/unregister 保留同步提交语义，避免立即退出丢弃待执行的系统更改。真实路径采样及验证边界见 `docs/settings-page-performance-2026-09-28.md`。
 
 ## 指针速度
 

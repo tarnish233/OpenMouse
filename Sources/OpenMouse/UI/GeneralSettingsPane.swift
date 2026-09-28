@@ -4,8 +4,7 @@ import SwiftUI
 struct GeneralSettingsPane: View {
     @State private var store = SettingsStore.shared
     @State private var engine = MouseEngine.shared
-    @State private var launchAtLogin = LoginItem.isEnabled
-    @State private var loginItemError: String?
+    @State private var loginItem = LoginItem.shared
     @State private var isConfirmingReset = false
 
     var body: some View {
@@ -24,16 +23,13 @@ struct GeneralSettingsPane: View {
                 .toggleStyle(.switch)
 
                 Toggle(isOn: Binding(
-                    get: { launchAtLogin },
-                    set: { newValue in
-                        loginItemError = LoginItem.setEnabled(newValue)
-                        launchAtLogin = LoginItem.isEnabled
-                    }
+                    get: { loginItem.isEnabled ?? false },
+                    set: { loginItem.setEnabled($0) }
                 )) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(Strings.generalLaunchAtLogin)
-                        if let loginItemError {
-                            Text(loginItemError)
+                        if let error = loginItem.error {
+                            Text(error)
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -41,6 +37,7 @@ struct GeneralSettingsPane: View {
                     }
                 }
                 .toggleStyle(.switch)
+                .disabled(loginItem.isEnabled == nil || loginItem.isUpdating)
             }
 
             Section("诊断") {
@@ -105,7 +102,7 @@ struct GeneralSettingsPane: View {
         } message: {
             Text("滚动参数、按键映射与应用规则都会被清空。")
         }
-        .onAppear { launchAtLogin = LoginItem.isEnabled }
+        .task { loginItem.refresh() }
     }
 
     private var statusText: String {
@@ -161,7 +158,7 @@ private struct LiveCounters: View {
                 if stats.wheelEventsSmoothed > 0 {
                     LabeledContent("投递目标") {
                         HStack(spacing: 8) {
-                            Text(targetName(pid: stats.lastTargetPID))
+                            TargetApplicationLabel(pid: stats.lastTargetPID)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -189,12 +186,21 @@ private struct LiveCounters: View {
         }
     }
 
-    /// A pid alone tells the user nothing; the app name is the part that confirms frames are
-    /// going where the pointer is.
-    private func targetName(pid: Int) -> String {
+}
+
+/// The half-second counter redraw only formats cached text; it never asks Launch Services.
+private struct TargetApplicationLabel: View {
+    let pid: Int
+    @State private var names = SettingsApplicationMetadata.names
+
+    var body: some View {
+        Text(label)
+            .task(id: pid) { if pid > 0 { names.refresh(pid) } }
+    }
+
+    private var label: String {
         guard pid > 0 else { return "未解析" }
-        let name = NSRunningApplication(processIdentifier: pid_t(pid))?.localizedName
-        return name.map { "\($0) (\(pid))" } ?? "pid \(pid)"
+        return names.value(for: pid).map { "\($0) (\(pid))" } ?? "pid \(pid)"
     }
 }
 

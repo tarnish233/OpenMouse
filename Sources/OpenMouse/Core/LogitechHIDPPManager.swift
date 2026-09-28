@@ -325,6 +325,8 @@ private final class LogitechHIDPPDeviceSession {
     private var dpiLevels: LogitechDPILevels?
     private var dpiStage: DPIToggleStage = .idle
     private var dpiTimeout: DispatchWorkItem?
+    private var dpiRefreshCache = LogitechDPIRefreshCache()
+    private var dpiRequestID: UUID?
 
     var ownedButtons: Set<Int> {
         Set(divertedCIDs.compactMap { LogitechHIDPPProtocol.cidToButton[$0] })
@@ -396,6 +398,8 @@ private final class LogitechHIDPPDeviceSession {
         dpiTimeout = nil
         dpiStage = .idle
         dpiLevels = nil
+        dpiRequestID = nil
+        dpiRefreshCache = LogitechDPIRefreshCache()
         releaseAllButtons()
         if let feature = reprogFeatureIndex {
             for cid in divertedCIDs.sorted() {
@@ -425,7 +429,8 @@ private final class LogitechHIDPPDeviceSession {
     }
 
     func refreshDPI() {
-        guard stage == .ready, dpiStage == .idle else { return }
+        guard stage == .ready, dpiStage == .idle,
+              dpiRefreshCache.needsRefresh(at: ProcessInfo.processInfo.systemUptime) else { return }
         beginDPIRequest(levels: nil)
     }
 
@@ -450,13 +455,16 @@ private final class LogitechHIDPPDeviceSession {
     }
 
     private func beginDPIRequest(levels: LogitechDPILevels?) {
+        // A real DPI press deliberately bypasses the UI cache/backoff: always read the device
+        // before choosing the other level. Page opens share the existing in-flight request.
+        dpiRequestID = UUID()
         dpiLevels = levels
         if let feature = dpiFeatureIndex {
             requestCurrentDPI(featureIndex: feature)
         } else {
             dpiStage = .feature
             armDPITimeout(label: "DPI feature discovery")
-            guard send(
+            guard sendDPIReport(
                 featureIndex: 0x00,
                 function: 0,
                 params: [
@@ -615,6 +623,7 @@ private final class LogitechHIDPPDeviceSession {
             dpiTimeout?.cancel()
             let index = report[4]
             guard index != 0 else {
+                dpiRefreshCache.markUnsupported()
                 finishDPIRequest(error: "device has no ADJUSTABLE_DPI feature")
                 return true
             }
@@ -629,6 +638,7 @@ private final class LogitechHIDPPDeviceSession {
                 finishDPIRequest(error: "invalid current DPI response")
                 return true
             }
+            dpiRefreshCache.recordSuccess(at: ProcessInfo.processInfo.systemUptime)
             onDPIChanged(current)
             guard let levels = dpiLevels else {
                 finishDPIRead(current: current)
@@ -641,7 +651,7 @@ private final class LogitechHIDPPDeviceSession {
             let target = levels.target(after: current)
             dpiStage = .write(target: target)
             armDPITimeout(label: "write \(target) DPI")
-            guard send(
+            guard sendDPIReport(
                 featureIndex: feature,
                 function: 3,
                 params: LogitechHIDPPProtocol.setDPIParameters(target)
@@ -654,6 +664,7 @@ private final class LogitechHIDPPDeviceSession {
 
         case let .write(target)
             where feature == dpiFeatureIndex && function == 3 && softwareID == 0x01:
+            dpiRefreshCache.recordSuccess(at: ProcessInfo.processInfo.systemUptime)
             onDPIChanged(target)
             finishDPIToggle(success: target)
             return true
@@ -666,7 +677,7 @@ private final class LogitechHIDPPDeviceSession {
     private func requestCurrentDPI(featureIndex: UInt8) {
         dpiStage = .current
         armDPITimeout(label: "read current DPI")
-        guard send(featureIndex: featureIndex, function: 2, params: [0x00]) else {
+        guard sendDPIReport(featureIndex: featureIndex, function: 2, params: [0x00]) else {
             finishDPIRequest(error: "current DPI request send failed")
             return
         }
@@ -683,11 +694,13 @@ private final class LogitechHIDPPDeviceSession {
     }
 
     private func finishDPIRequest(error: String) {
+        dpiRefreshCache.recordFailure(at: ProcessInfo.processInfo.systemUptime)
         resetDPIRequest()
         Self.log.error("\(self.name, privacy: .public) DPI request failed: \(error, privacy: .public)")
     }
 
     private func resetDPIRequest() {
+        dpiRequestID = nil
         dpiTimeout?.cancel()
         dpiTimeout = nil
         dpiStage = .idle
@@ -705,20 +718,50 @@ private final class LogitechHIDPPDeviceSession {
         return ok
     }
 
+    /// DPI reads/writes must never wait for Bluetooth on the main run loop. In particular,
+    /// `onAppear` runs before the Buttons form's first frame; the synchronous API used to
+    /// hold that frame (and the event tap) on every visit. Do not add a synchronous fallback.
     @discardableResult
-    private func send(featureIndex: UInt8, function: UInt8, params: [UInt8] = []) -> Bool {
+    private func sendDPIReport(featureIndex: UInt8, function: UInt8, params: [UInt8] = []) -> Bool {
+        let requestID = dpiRequestID
+        let expectedStage = dpiStage
+        let result = HIDAsyncReport.send(
+            report(featureIndex: featureIndex, function: function, params: params),
+            submit: { bytes, count, callback, context in
+                IOHIDDeviceSetReportWithCallback(
+                    device, kIOHIDReportTypeOutput, CFIndex(Self.longReportID),
+                    bytes, count, 1_000, callback, context
+                )
+            },
+            completion: { [weak self] result in
+                guard result != kIOReturnSuccess else { return }
+                // IOKit completes on the scheduled run loop. Defer teardown (including an
+                // abort delivered by UnscheduleFromRunLoop) and ignore obsolete completions.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.stopped,
+                          self.dpiRequestID == requestID, self.dpiStage == expectedStage else { return }
+                    self.finishDPIRequest(error: "async send failed: \(result)")
+                }
+            }
+        )
+        return result == kIOReturnSuccess
+    }
+
+    private func report(featureIndex: UInt8, function: UInt8, params: [UInt8]) -> [UInt8] {
         var report = [UInt8](repeating: 0, count: Self.reportSize)
         report[0] = Self.longReportID
         report[1] = Self.deviceIndex
         report[2] = featureIndex
         report[3] = (function << 4) | 0x01
         for (offset, value) in params.prefix(16).enumerated() { report[4 + offset] = value }
+        return report
+    }
+
+    @discardableResult
+    private func send(featureIndex: UInt8, function: UInt8, params: [UInt8] = []) -> Bool {
+        let bytes = report(featureIndex: featureIndex, function: function, params: params)
         let result = IOHIDDeviceSetReport(
-            device,
-            kIOHIDReportTypeOutput,
-            CFIndex(Self.longReportID),
-            report,
-            report.count
+            device, kIOHIDReportTypeOutput, CFIndex(Self.longReportID), bytes, bytes.count
         )
         return result == kIOReturnSuccess
     }

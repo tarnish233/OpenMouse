@@ -263,7 +263,12 @@ final class PointerSpeedController {
                 }
                 continue
             }
-            let state = apply(device.acceleration, to: service, key: accelerationKey)
+            let state: ApplyState
+            if Self.needsWrite(current: current, previous: previous[key], target: device.acceleration) {
+                state = apply(device.acceleration, to: service, key: accelerationKey)
+            } else {
+                state = .applied(PointerSpeed.value(fromFixed: PointerSpeed.fixed(device.acceleration)))
+            }
             next[key] = state
             // Dragging the slider reconciles on every step, so only a real transition is worth
             // a line. Without this the log is unreadable exactly when it is needed.
@@ -289,20 +294,9 @@ final class PointerSpeedController {
             next[device.key] = masterEnabled && device.enabled ? .offline : .disabled
         }
 
-        discovered = found
-        states = next
+        if discovered != found { discovered = found }
+        if states != next { states = next }
         return stale ? .clientLooksStale : .settled
-    }
-
-    /// True when nothing is left to wait for, which is what lets the post-replug retry chain stop
-    /// early instead of always running to its end.
-    private var everyEnabledDeviceIsApplied: Bool {
-        let settings = SettingsStore.shared.preferences
-        guard settings.enabled else { return true }
-        for device in settings.pointer.devices where device.enabled {
-            guard case .applied = states[device.key] else { return false }
-        }
-        return true
     }
 
     /// Explicit user escape hatch. Disables every configured device *and* force-writes the
@@ -361,6 +355,13 @@ final class PointerSpeedController {
             }
             return (lhs.key.vendorID, lhs.key.productID) < (rhs.key.vendorID, rhs.key.productID)
         }
+    }
+
+    /// Only skip a write when we already own it AND the live readback still agrees. A new
+    /// device, changed preference or another tool's write must still go through apply/readback.
+    nonisolated static func needsWrite(current: Int?, previous: ApplyState?, target: Double) -> Bool {
+        let fixed = PointerSpeed.fixed(target)
+        return previous != .applied(PointerSpeed.value(fromFixed: fixed)) || current != fixed
     }
 
     // MARK: Writing
@@ -493,8 +494,9 @@ final class PointerSpeedController {
     /// cached client outright, so the client is dropped before re-scanning.
     ///
     /// The chain of attempts exists because a device's service is not necessarily published the
-    /// instant its registry entry appears. It stops as soon as everything the user enabled is
-    /// applied, so the common case costs one pass.
+    /// instant its registry entry appears. Finish the bounded discovery window even if every
+    /// configured device is applied: a NEW, unconfigured mouse may not be published yet. Page
+    /// entry no longer rescans, so it cannot be relied on to rescue that late-arriving row.
     private func scheduleRescan() {
         rescanTask?.cancel()
         // Logged unconditionally: when this feature failed in the field, the first unanswerable
@@ -506,13 +508,12 @@ final class PointerSpeedController {
                 guard !Task.isCancelled, let self, self.isRunning else { return }
                 self.invalidateClient()
                 self.reconcile()
-                if self.everyEnabledDeviceIsApplied { return }
             }
         }
     }
 
     /// Intervals between attempts, i.e. roughly 0.4s / 1.2s / 3s / 6s after the device event.
-    private static let rescanDelays: [Duration] = [
+    nonisolated static let rescanDelays: [Duration] = [
         .milliseconds(400),
         .milliseconds(800),
         .milliseconds(1_800),
@@ -530,6 +531,7 @@ final class PointerSpeedController {
                 // subscribed to, so the client is assumed stale here too.
                 self?.invalidateClient()
                 self?.reconcile()
+                self?.scheduleRescan()
             }
         }
     }
@@ -538,7 +540,7 @@ final class PointerSpeedController {
         withObservationTracking {
             _ = SettingsStore.shared.preferences.pointer
             _ = SettingsStore.shared.preferences.enabled
-        } onChange: {
+        } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.isRunning else { return }
                 self.reconcile()

@@ -59,6 +59,12 @@ struct AppRulesPane: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 8, for: .scrollContent)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Applications can be installed, moved or updated while the user is elsewhere.
+            for rule in store.preferences.rules {
+                SettingsApplicationMetadata.icons.refresh(rule.bundleID, force: true)
+            }
+        }
     }
 
     private func addApp() {
@@ -187,18 +193,27 @@ private struct AppRuleScrollControls: View {
 
 private struct AppIcon: View {
     let bundleID: String
+    @State private var icons = SettingsApplicationMetadata.icons
+    @State private var displayedImage: NSImage?
 
     var body: some View {
-        Image(nsImage: icon)
-            .resizable()
-            .frame(width: 18, height: 18)
-    }
-
-    private var icon: NSImage {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return NSWorkspace.shared.icon(forFile: url.path)
+        Group {
+            if let image = displayedImage ?? icons.value(for: bundleID) {
+                Image(nsImage: image).resizable()
+            } else {
+                Image(systemName: "app").resizable()
+            }
         }
-        return NSWorkspace.shared.icon(for: .applicationBundle)
+        .frame(width: 18, height: 18)
+        .task(id: bundleID) {
+            displayedImage = icons.value(for: bundleID)
+            icons.refresh(bundleID)
+        }
+        .onChange(of: icons.revision(for: bundleID)) { _, revision in
+            // Evicting an offscreen cache entry must not erase an already displayed icon.
+            // An actual lookup result (including "application missing") does replace it.
+            if revision != nil { displayedImage = icons.value(for: bundleID) }
+        }
     }
 }
 

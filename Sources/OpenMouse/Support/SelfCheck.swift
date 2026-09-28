@@ -146,6 +146,8 @@ enum SelfCheck {
             hidppEncodesDivertWithoutRemapping()
             hidppIncludesDpiSwitchDuringCapture()
             hidppEncodesDPIAndChoosesOtherLevel()
+            hidppDPIRefreshCacheExpiresWithoutLosingState()
+            hidppAsyncReportOwnsBytesUntilCompletion()
             hidppDecodesPhysicalHoldSet()
             hidppHoldOutlivesMomentaryNativeMouseUp()
         }
@@ -240,7 +242,13 @@ enum SelfCheck {
             savingKeepsImmediateSectionsLive()
             discardingRestoresOnlyDraftSections()
         }
+        group("设置页异步元数据") {
+            settingsMetadataCacheCoalescesAndExpires()
+            settingsMetadataCacheRejectsStaleRepliesAndBoundsMemory()
+            loginItemSerializesStatusAndUserChanges()
+        }
         group("指针速度") {
+            pointerDiscoverySkipsOnlyConfirmedUnchangedWrites()
             fixedPointRoundTripsMeasuredValues()
             clampsPointerAccelerationDefensively()
             pointerSettingsDegradeFieldByField()
@@ -1141,6 +1149,94 @@ enum SelfCheck {
             ) == 1_000,
             "GetSensorDpi 响应解析出当前 1000 DPI"
         )
+    }
+
+    private static func hidppDPIRefreshCacheExpiresWithoutLosingState() {
+        var cache = LogitechDPIRefreshCache()
+        expect(cache.needsRefresh(at: 100), "DPI 冷缓存首次进入需要查询")
+        cache.recordSuccess(at: 100)
+        expect(!cache.needsRefresh(at: 100), "刚收到硬件响应不再重复查询")
+        expect(!cache.needsRefresh(at: 109.999), "十秒内反复进入按键页复用缓存")
+        expect(cache.needsRefresh(at: 110), "缓存恰好到期允许后台刷新")
+        expect(cache.needsRefresh(at: 99), "单调时钟回退不会永久保留旧缓存")
+        cache.recordSuccess(at: 108)
+        expect(!cache.needsRefresh(at: 117), "真实 DPI 更新延长缓存有效期")
+        expect(cache.needsRefresh(at: 118), "真实 DPI 更新后的缓存同样会过期")
+        cache.recordFailure(at: 120)
+        expect(!cache.needsRefresh(at: 124.999), "失败后短暂退避避免每次切页反复查询")
+        expect(cache.needsRefresh(at: 125), "查询失败五秒后可重试而非永久失效")
+        expect(cache.needsRefresh(at: 119), "失败退避同样允许时钟回退后恢复")
+        cache.recordSuccess(at: 122)
+        expect(!cache.needsRefresh(at: 125), "恢复成功清除失败退避，按成功时间缓存")
+        cache.markUnsupported()
+        expect(!cache.needsRefresh(at: 1000), "不支持 DPI 的设备不在每次切页重复发现")
+        cache.recordFailure(at: 1000)
+        expect(!cache.needsRefresh(at: 1010), "失败记录不清除不支持标记")
+        cache.recordSuccess(at: 1010)
+        expect(cache.needsRefresh(at: 1020), "真实硬件读成功可解除不支持标记")
+        cache.markUnsupported()
+        cache = LogitechDPIRefreshCache()
+        expect(cache.needsRefresh(at: 1011), "重连使用全新缓存，不继承旧设备值或能力")
+    }
+
+    private static func hidppAsyncReportOwnsBytesUntilCompletion() {
+        final class LifetimeProbe {}
+        let report: [UInt8] = [0x11, 0xFF, 0x09, 0x21, 0x00]
+        var callback: IOHIDReportCallback?
+        var context: UnsafeMutableRawPointer?
+        var bytes: UnsafePointer<UInt8>?
+        var count = 0
+        var completions: [IOReturn] = []
+        weak var lifetime: LifetimeProbe?
+        func submit() -> IOReturn {
+            let probe = LifetimeProbe()
+            lifetime = probe
+            return HIDAsyncReport.send(report, submit: { pointer, length, cb, ctx in
+                bytes = pointer
+                count = length
+                callback = cb
+                context = ctx
+                return kIOReturnSuccess
+            }, completion: { [probe] result in
+                withExtendedLifetime(probe) { completions.append(result) }
+            })
+        }
+        expect(submit() == kIOReturnSuccess, "异步 HID 提交立即返回，无需等待硬件响应")
+        expect(completions.isEmpty, "异步提交成功不伪造协议成功响应")
+        expect(lifetime != nil, "异步回调闭包在提交返回后仍被保留")
+        if let bytes {
+            expect(Array(UnsafeBufferPointer(start: bytes, count: count)) == report,
+                   "异步报告字节在提交函数返回后仍有效")
+            callback?(context, kIOReturnSuccess, nil, kIOHIDReportTypeOutput, 0x11,
+                      UnsafeMutablePointer(mutating: bytes), count)
+        } else {
+            expect(false, "异步提交提供报告缓冲区")
+        }
+        expect(completions == [kIOReturnSuccess], "硬件回调只报告一次发送结果")
+        expect(lifetime == nil, "完成回调后释放报告及其闭包")
+
+        completions = []
+        expect(submit() == kIOReturnSuccess, "断线测试可提交待完成的报告")
+        if let bytes {
+            callback?(context, kIOReturnAborted, nil, kIOHIDReportTypeOutput, 0x11,
+                      UnsafeMutablePointer(mutating: bytes), count)
+        }
+        expect(completions == [kIOReturnAborted], "设备 unschedule 的 abort 回调被正确转交")
+        expect(lifetime == nil, "断线取消同样释放缓冲区，不保活旧会话")
+
+        func reject() -> IOReturn {
+            let probe = LifetimeProbe()
+            lifetime = probe
+            return HIDAsyncReport.send(report, submit: { _, _, _, _ in
+                kIOReturnNotReady
+            }, completion: { [probe] result in
+                withExtendedLifetime(probe) { completions.append(result) }
+            })
+        }
+        completions = []
+        expect(reject() == kIOReturnNotReady, "同步提交失败直接返回错误，不回退同步 IO")
+        expect(completions.isEmpty, "提交失败不等待不会到来的回调")
+        expect(lifetime == nil, "提交失败立即释放报告和闭包")
     }
 
     private static func hidppDecodesPhysicalHoldSet() {
@@ -3492,6 +3588,159 @@ enum SelfCheck {
 
     /// Pins the measured constants. 45056 is what a live mouse service, the system-wide
     /// `IOHIDSystem` property, and LinearMouse's hardcoded fallback all report.
+    private static func settingsMetadataCacheCoalescesAndExpires() {
+        MainActor.assumeIsolated {
+            var clock: TimeInterval = 100
+            var replies: [(String?) -> Void] = []
+            let cache = SettingsMetadataCache<String, String>(
+                lifetime: 10, missingLifetime: 2, now: { clock }
+            ) { _, reply in replies.append(reply) }
+            expect(cache.value(for: "app") == nil && replies.isEmpty,
+                   "元数据读取不启动同步 IO，冷缓存立即返回占位")
+            cache.refresh("app")
+            expect(replies.count == 1 && cache.contains("app"), "首次刷新提交一次异步请求")
+            cache.refresh("app")
+            cache.refresh("app", force: true)
+            expect(replies.count == 1, "重复及强制刷新都合并在途请求")
+            replies[0]("图标 A")
+            expect(cache.value(for: "app") == "图标 A", "异步结果发布给可观察缓存")
+            clock = 109.999
+            cache.refresh("app")
+            expect(replies.count == 1, "有效期内重复切页不重复加载")
+            clock = 110
+            cache.refresh("app")
+            expect(replies.count == 2 && cache.value(for: "app") == "图标 A",
+                   "缓存到期后台刷新，等待期间仍显示旧图标")
+            replies[1]("图标 B")
+            expect(cache.value(for: "app") == "图标 B", "过期刷新成功后替换旧图标")
+            cache.refresh("app", force: true)
+            expect(replies.count == 3, "外部状态变化允许绕过 TTL 强制刷新")
+            let oldRevision = cache.revision(for: "app")
+            replies[2](nil)
+            expect(cache.revision(for: "app") != nil && cache.revision(for: "app") != oldRevision,
+                   "应用缺失结果仍产生新修订，使可见图标清除旧内容")
+            expect(cache.value(for: "app") == nil && cache.contains("app"),
+                   "卸载/找不到应用保留负缓存，不永久显示旧图标")
+            clock = 111.999
+            cache.refresh("app")
+            expect(replies.count == 3, "缺失应用也缓存，避免不断扫描不存在的路径")
+            clock = 112
+            cache.refresh("app")
+            expect(replies.count == 4, "负缓存短期过期后允许发现新安装应用")
+            replies[3]("新安装")
+            expect(cache.value(for: "app") == "新安装", "缺失应用恢复后更新显示值")
+        }
+    }
+
+    private static func settingsMetadataCacheRejectsStaleRepliesAndBoundsMemory() {
+        MainActor.assumeIsolated {
+            var replies: [Int: [(String?) -> Void]] = [:]
+            let cache = SettingsMetadataCache<Int, String>(lifetime: 60, capacity: 2) { key, reply in
+                replies[key, default: []].append(reply)
+            }
+            cache.refresh(42)
+            let old = replies[42]![0]
+            cache.invalidate(42)
+            expect(!cache.contains(42), "应用退出或身份变化会移除缓存及待完成身份")
+            cache.refresh(42)
+            old("旧进程")
+            expect(cache.value(for: 42) == nil && cache.contains(42),
+                   "PID 复用后旧回调不会覆盖新进程的在途请求")
+            cache.refresh(42)
+            expect(replies[42]!.count == 2, "旧回调不会错误清除新请求的合并标记")
+            replies[42]![1]("新进程")
+            old("重复旧回调")
+            expect(cache.value(for: 42) == "新进程", "失效前的迟到响应永远不能恢复旧名称")
+            replies[42]![1]("重复完成")
+            expect(cache.value(for: 42) == "新进程", "同一个完成回调只能提交一次")
+            cache.refresh(43)
+            replies[43]![0]("第二个")
+            expect(cache.value(for: 42) == "新进程" && cache.value(for: 43) == "第二个",
+                   "不同应用缓存互不串值")
+            cache.refresh(44)
+            replies[44]![0]("第三个")
+            expect(cache.revision(for: 42) == nil, "缓存淘汰没有新结果修订，可见图标可以保留已加载图像")
+            expect(!cache.contains(42) && cache.value(for: 44) == "第三个",
+                   "元数据缓存有容量上限，淘汰最早完成的条目")
+            cache.refresh(42)
+            expect(replies[42]!.count == 3, "被淘汰的应用可重新后台加载")
+        }
+    }
+
+    private static func loginItemSerializesStatusAndUserChanges() {
+        MainActor.assumeIsolated {
+            var clock: TimeInterval = 100
+            var reads: [(Bool) -> Void] = []
+            var writes: [(Bool, (LoginItem.Result) -> Void)] = []
+            let model = LoginItem(now: { clock }, read: { reads.append($0) }, write: {
+                writes.append(($0, $1))
+            })
+            expect(model.isEnabled == nil && reads.isEmpty && writes.isEmpty,
+                   "创建通用页登录项模型不进行系统查询")
+            model.setEnabled(true)
+            expect(writes.isEmpty, "未知登录项状态时不接受误触注册")
+            model.refresh()
+            model.refresh(force: true)
+            expect(reads.count == 1, "重复进入通用页合并在途登录项查询")
+            reads[0](true)
+            expect(model.isEnabled == true, "登录项查询完成后显示真实状态")
+            clock = 104.999
+            model.refresh()
+            expect(reads.count == 1, "五秒内进入通用页复用登录项状态")
+            clock = 105
+            model.refresh()
+            expect(reads.count == 2, "登录项状态缓存过期可重新查询")
+            model.setEnabled(false)
+            expect(model.isUpdating && writes.count == 1 && writes[0].0 == false,
+                   "登录项更改异步提交并阻止重复操作")
+            model.setEnabled(true)
+            model.refresh(force: true)
+            expect(writes.count == 1 && reads.count == 2, "写入期间不交叉重复注册或查询")
+            reads[1](false)
+            expect(model.isEnabled == true && model.isUpdating, "先前读取结果不能覆盖正在写入的状态")
+            writes[0].1(LoginItem.Result(enabled: true, error: "系统拒绝"))
+            expect(model.isEnabled == true && !model.isUpdating && model.error == "系统拒绝",
+                   "写入失败恢复真实状态并显示错误，不伪装成功")
+            model.setEnabled(false)
+            expect(model.error == nil && model.isUpdating && writes.count == 2,
+                   "重新操作清除旧错误并提交新请求")
+            writes[0].1(LoginItem.Result(enabled: true, error: "旧错误"))
+            expect(model.isUpdating && model.error == nil, "旧写入重复回调不能结束新操作")
+            writes[1].1(LoginItem.Result(enabled: false, error: nil))
+            expect(model.isEnabled == false && !model.isUpdating && model.error == nil,
+                   "写入成功仍按系统读回状态更新开关")
+            model.refresh(force: true)
+            expect(reads.count == 3, "返回应用时强制读取外部修改，即使缓存尚未过期")
+            reads[2](true)
+            expect(model.isEnabled == true, "系统设置中修改登录项后能够刷新显示")
+            clock = 99
+            model.refresh()
+            expect(reads.count == 4, "登录项缓存不因时钟回退永久冻结")
+        }
+    }
+
+    private static func pointerDiscoverySkipsOnlyConfirmedUnchangedWrites() {
+        let value = PointerSpeed.systemDefault
+        let fixed = PointerSpeed.fixed(value)
+        expect(!PointerSpeedController.needsWrite(current: fixed, previous: .applied(value), target: value),
+               "已应用且真实读回一致的指针速度不重复写入")
+        expect(PointerSpeedController.needsWrite(current: fixed, previous: nil, target: value),
+               "新设备不能仅因值恰好相同就假装已接管")
+        expect(PointerSpeedController.needsWrite(current: fixed, previous: .disabled, target: value),
+               "新启用的设备仍写入并确认")
+        expect(PointerSpeedController.needsWrite(current: fixed + 1, previous: .applied(value), target: value),
+               "其他工具更改了设备值后仍重新应用")
+        expect(PointerSpeedController.needsWrite(current: nil, previous: .applied(value), target: value),
+               "读回丢失不当作缓存命中")
+        expect(PointerSpeedController.needsWrite(current: fixed, previous: .applied(value), target: 2),
+               "用户调节速度不被缓存吞掉")
+        expect(PointerSpeedController.needsWrite(current: fixed, previous: .rejected, target: value),
+               "上次写入失败的设备允许重试")
+        expect(PointerSpeedController.rescanDelays == [.milliseconds(400), .milliseconds(800),
+                                                      .milliseconds(1_800), .seconds(3)],
+               "热插拔采用完整有限重试窗口，覆盖尚未配置的新设备延迟发布")
+    }
+
     private static func fixedPointRoundTripsMeasuredValues() {
         expect(
             PointerSpeed.fixed(PointerSpeed.systemDefault) == 45_056,

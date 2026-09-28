@@ -57,7 +57,8 @@ struct PointerSettingsPane: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 8, for: .scrollContent)
-        .onAppear { controller.reconcile() }
+        // The long-lived controller owns discovery, hot-plug/wake refresh and preference
+        // application. Opening a form must only render its snapshot, not rewrite hardware.
     }
 
     // MARK: Bindings
