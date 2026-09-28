@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import os
 
 /// Keeps window ordering behind application activation. Ordering an inactive app's window with
 /// `orderFrontRegardless` makes it appear above the current app for one frame, then fall behind
@@ -30,6 +31,7 @@ enum SettingsWindowPresentationSequence {
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private static var shared: SettingsWindowController?
+    static var confirmationWindow: NSWindow? { shared?.window }
     private lazy var activationLease = AppActivationLease(
         onEnter: { AppActivationPolicy.enter() },
         onLeave: { AppActivationPolicy.leave() }
@@ -39,7 +41,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     static func show(tab: SettingsTab? = nil) {
         if let tab {
-            SettingsNavigation.shared.selectedTab = tab
+            SettingsNavigation.shared.select(tab)
         }
         // Opens the draft session before the window exists, so the first thing any pane binds to
         // is already inside a session and no early edit can escape the Save button.
@@ -146,10 +148,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        SettingsLeaveConfirmation.confirm()
+        guard !SettingsLeaveConfirmation.isPending else { return false }
+        guard SettingsStore.shared.hasUnsavedChanges else { return true }
+        SettingsLeaveConfirmation.request(on: sender) { [weak self, weak sender] shouldClose in
+            guard let self, let sender, self.window === sender, shouldClose else { return }
+            // Re-enter the normal delegate path only after Save/Discard has resolved the draft.
+            sender.performClose(nil)
+        }
+        return false
     }
 
     func windowWillClose(_ notification: Notification) {
+        Logger(subsystem: "com.openmouse.OpenMouse", category: "settings").info("settings window closed")
         stopWaitingForActivation()
         MouseEngine.shared.endButtonCapture()
         // Ends the draft session: anything not saved is reverted here, which is also what makes

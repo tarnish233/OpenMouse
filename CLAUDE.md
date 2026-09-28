@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 434 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
+make test     # 应用自检 462 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -221,6 +221,14 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 **窗口外的改动必须立刻提交**：`resetAll()`（显式的破坏性操作，一半挂在保存按钮后面会让按钮的含义取决于你看哪一段）和状态菜单的 `toggleBypassRule`（菜单动作，不是编辑手势）都走 `commitImmediately()`。所以 `StatusItemController` 调 `store.toggleBypassRule(...)` 而不是直接改 `store.preferences`。
 
 **给 `Preferences` 加字段时必须显式归类。** 自检 `draftSectionsPartitionEveryPreferenceField()` 比对编码出来的顶层键集合与两个显式集合，漏了会直接红——不归类的默认行为是「即时生效」，对一个能被感觉到的设置来说那会悄悄违背保存按钮的承诺。
+
+### 离开确认不能嵌套同步模态循环
+
+`SettingsLeaveConfirmation` 通过下一轮主队列呈现挂在设置窗口上的 `NSAlert.beginSheetModal`。**禁止在 SwiftUI 的 List 选择 / Binding setter 内调用 `runModal()`**：macOS 27 上实测可停在不可见确认框的模态循环中，侧栏已高亮新页而正文仍是旧页，看起来像鼠标卡死。该现场由两次进程采样确认，非 HID++ 请求阻塞。
+
+`SettingsLeaveCoordinator` 从排队到用户决策都只允许一个请求；重复请求不能覆盖原操作，旧回复不能影响新请求。找不到父窗口或已有其他 sheet 时取消离开，不能回退成独立 app-modal alert。取消不得保存或丢弃草稿。导航的正文、侧栏与前进/后退历史只在确认后统一提交；sheet 完成回调先返回 AppKit，下一轮主队列再处理用户决定并继续原动作；关闭窗口先返回 false，确认后再走 `performClose`；退出用 `terminateLater` / `reply(toApplicationShouldTerminate:)` 配对。
+
+发布前除了自检，还必须用隔离 Debug 包实际验证「有未保存修改 → 切页 / 返回 / 关闭 / 退出」的保存、不保存和取消，确认 sheet 可见且响应。纯粹测按钮返回值无法覆盖这个 UI bug。
 
 ## 手势导航
 

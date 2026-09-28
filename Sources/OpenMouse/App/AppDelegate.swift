@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -43,7 +44,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        SettingsLeaveConfirmation.confirm() ? .terminateNow : .terminateCancel
+        guard !SettingsLeaveConfirmation.isPending else { return .terminateCancel }
+        guard SettingsStore.shared.hasUnsavedChanges else { return .terminateNow }
+        let accepted = SettingsLeaveConfirmation.request { shouldTerminate in
+            Logger(subsystem: "com.openmouse.OpenMouse", category: "settings")
+                .info("deferred termination reply: \(shouldTerminate)")
+            sender.reply(toApplicationShouldTerminate: shouldTerminate)
+        }
+        // The reply is deferred along with sheet presentation, never sent before this return.
+        return accepted ? .terminateLater : .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {

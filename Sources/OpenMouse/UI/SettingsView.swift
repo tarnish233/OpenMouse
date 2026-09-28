@@ -33,26 +33,81 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     }
 }
 
-/// Singleton so the menu bar can deep-link into a specific pane.
+/// Commits navigation and history only after the user has resolved the current draft.
 @MainActor
 @Observable
 final class SettingsNavigation {
-    static let shared = SettingsNavigation()
-    var selectedTab: SettingsTab? {
-        get { currentTab }
-        set { _ = select(newValue) }
-    }
-    private var currentTab: SettingsTab? = .scroll
+    static let shared = SettingsNavigation(confirmLeave: { completion in
+        SettingsLeaveConfirmation.request(completion: completion)
+    })
 
-    @discardableResult
-    func select(_ tab: SettingsTab?) -> Bool {
-        guard let tab, tab != currentTab else { return false }
-        guard SettingsLeaveConfirmation.confirm() else { return false }
-        currentTab = tab
-        return true
+    // List highlights a row optimistically. Keep that tentative selection separate from
+    // the committed pane so Cancel can explicitly restore both the row and its content.
+    var sidebarSelection: SettingsTab? {
+        didSet {
+            guard let tab = sidebarSelection else {
+                sidebarSelection = selectedTab
+                return
+            }
+            if tab != selectedTab { select(tab) }
+        }
+    }
+    private(set) var history: [SettingsTab]
+    private(set) var historyIndex = 0
+    private(set) var isNavigationPending = false
+    var selectedTab: SettingsTab { history[historyIndex] }
+    var canGoBack: Bool { historyIndex > 0 && !isNavigationPending }
+    var canGoForward: Bool { historyIndex < history.count - 1 && !isNavigationPending }
+    @ObservationIgnored private let confirmLeave: (@escaping (Bool) -> Void) -> Bool
+
+    init(
+        initialTab: SettingsTab = .scroll,
+        confirmLeave: @escaping (@escaping (Bool) -> Void) -> Bool
+    ) {
+        history = [initialTab]
+        sidebarSelection = initialTab
+        self.confirmLeave = confirmLeave
     }
 
-    private init() {}
+    func select(_ tab: SettingsTab?) {
+        guard let tab, tab != selectedTab else { return }
+        navigate(to: tab, historyIndex: nil)
+    }
+
+    func goBack() {
+        guard canGoBack else { return }
+        navigate(to: history[historyIndex - 1], historyIndex: historyIndex - 1)
+    }
+
+    func goForward() {
+        guard canGoForward else { return }
+        navigate(to: history[historyIndex + 1], historyIndex: historyIndex + 1)
+    }
+
+    private func navigate(to tab: SettingsTab, historyIndex targetIndex: Int?) {
+        guard !isNavigationPending else {
+            sidebarSelection = selectedTab
+            return
+        }
+        isNavigationPending = true
+        let accepted = confirmLeave { [weak self] shouldLeave in
+            guard let self else { return }
+            if shouldLeave {
+                if let targetIndex {
+                    self.historyIndex = targetIndex
+                } else {
+                    self.history = Array(self.history.prefix(self.historyIndex + 1)) + [tab]
+                    self.historyIndex = self.history.count - 1
+                }
+            }
+            self.sidebarSelection = self.selectedTab
+            self.isNavigationPending = false
+        }
+        if !accepted {
+            sidebarSelection = selectedTab
+            isNavigationPending = false
+        }
+    }
 }
 
 enum AppVersion {
@@ -73,15 +128,12 @@ enum AppVersion {
 struct SettingsView: View {
     @State private var navigation = SettingsNavigation.shared
     @State private var store = SettingsStore.shared
-    @State private var history: [SettingsTab] = [.scroll]
-    @State private var historyIndex = 0
-    @State private var isHistoryNavigation = false
 
-    private var activeTab: SettingsTab { navigation.selectedTab ?? .scroll }
+    private var activeTab: SettingsTab { navigation.selectedTab }
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
-            SettingsSidebar(selectedTab: $navigation.selectedTab)
+            SettingsSidebar(selectedTab: $navigation.sidebarSelection)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 200, max: 200)
                 .toolbar(removing: .sidebarToggle)
         } detail: {
@@ -92,10 +144,10 @@ struct SettingsView: View {
         .frame(minWidth: 700, minHeight: 520)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
-                Button { goBack() } label: { Image(systemName: "chevron.left") }
-                    .disabled(historyIndex <= 0)
-                Button { goForward() } label: { Image(systemName: "chevron.right") }
-                    .disabled(historyIndex >= history.count - 1)
+                Button { navigation.goBack() } label: { Image(systemName: "chevron.left") }
+                    .disabled(!navigation.canGoBack)
+                Button { navigation.goForward() } label: { Image(systemName: "chevron.right") }
+                    .disabled(!navigation.canGoForward)
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button(Strings.settingsRevert) { store.discardEdits() }
@@ -106,34 +158,6 @@ struct SettingsView: View {
                 }
             }
         }
-        .onChange(of: navigation.selectedTab) { _, _ in record() }
-    }
-
-    private func goBack() {
-        guard historyIndex > 0 else { return }
-        isHistoryNavigation = true
-        if navigation.select(history[historyIndex - 1]) {
-            historyIndex -= 1
-        }
-        Task { @MainActor in isHistoryNavigation = false }
-    }
-
-    private func goForward() {
-        guard historyIndex < history.count - 1 else { return }
-        isHistoryNavigation = true
-        if navigation.select(history[historyIndex + 1]) {
-            historyIndex += 1
-        }
-        Task { @MainActor in isHistoryNavigation = false }
-    }
-
-    private func record() {
-        guard !isHistoryNavigation, let tab = navigation.selectedTab, history[historyIndex] != tab else { return }
-        if historyIndex < history.count - 1 {
-            history = Array(history.prefix(historyIndex + 1))
-        }
-        history.append(tab)
-        historyIndex = history.count - 1
     }
 }
 

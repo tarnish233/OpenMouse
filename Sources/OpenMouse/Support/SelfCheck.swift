@@ -181,6 +181,8 @@ enum SelfCheck {
             applicationMenuProvidesStandardShortcuts()
             settingsWindowWaitsForActivationBeforeOrderingFront()
             settingsLeaveRequiresExplicitDecision()
+            settingsLeaveDefersPresentationAndSerializesRequests()
+            settingsNavigationCommitsAfterConfirmation()
             versionFallbackIsHonest()
             debugPreferencesAreIsolated()
             statusItemPresentationTracksRuntimeState()
@@ -1956,6 +1958,156 @@ enum SelfCheck {
                    "离开时选择取消：不保存、不撤销且留在原页面")
             expect(!resolve(.abort) && saves == 1 && discards == 1,
                    "提示被中断时默认留在原页面，不丢弃修改")
+        }
+    }
+
+    private static func settingsLeaveDefersPresentationAndSerializesRequests() {
+        MainActor.assumeIsolated {
+            var dirty = false
+            var saves = 0
+            var discards = 0
+            var queued: [() -> Void] = []
+            var replies: [SettingsLeaveCoordinator.Reply] = []
+            var outcomes: [Bool] = []
+            let coordinator = SettingsLeaveCoordinator(
+                hasUnsavedChanges: { dirty },
+                save: { saves += 1; dirty = false },
+                discard: { discards += 1; dirty = false },
+                enqueue: { queued.append($0) }
+            )
+            @MainActor func request() -> Bool {
+                coordinator.request(present: { replies.append($0) }, completion: { outcomes.append($0) })
+            }
+
+            expect(request() && outcomes == [true] && queued.isEmpty && replies.isEmpty,
+                   "没有草稿时直接允许离开，不创建确认窗口")
+            @MainActor func respond(_ index: Int, _ response: NSApplication.ModalResponse) {
+                replies[index](response)
+                while !queued.isEmpty { queued.removeFirst()() }
+            }
+            outcomes = []
+            dirty = true
+            expect(request() && coordinator.isPending && queued.count == 1
+                   && replies.isEmpty && outcomes.isEmpty && saves == 0 && discards == 0,
+                   "有草稿时先返回，弹窗必须延迟到当前 UI 更新栈结束之后")
+            expect(!request() && queued.count == 1 && outcomes.isEmpty,
+                   "弹窗尚未显示时的重复离开请求也不能替换原请求")
+            queued.removeFirst()()
+            expect(replies.count == 1 && coordinator.isPending && outcomes.isEmpty,
+                   "异步显示弹窗后继续等待用户，不预先切页或修改草稿")
+            expect(!request() && replies.count == 1 && queued.isEmpty,
+                   "确认期间不能再弹第二个窗口或把切页替换成退出")
+            replies[0](.alertThirdButtonReturn)
+            expect(coordinator.isPending && outcomes.isEmpty && queued.count == 1,
+                   "sheet 回复后先返回 AppKit，下一轮才继续切页、关闭或退出")
+            queued.removeFirst()()
+            expect(outcomes == [false] && dirty && saves == 0 && discards == 0 && !coordinator.isPending,
+                   "取消异步确认保持草稿，并释放请求占用")
+
+            expect(request(), "取消后可以重新发起离开请求")
+            queued.removeFirst()()
+            respond(0, .alertSecondButtonReturn)
+            expect(coordinator.isPending && outcomes == [false] && discards == 0,
+                   "旧弹窗的迟到回调不能丢弃新请求的草稿")
+            respond(1, .alertFirstButtonReturn)
+            expect(outcomes == [false, true] && saves == 1 && !dirty && !coordinator.isPending,
+                   "保存完成后才允许原离开动作继续")
+            respond(1, .alertFirstButtonReturn)
+            expect(saves == 1 && outcomes.count == 2, "同一弹窗重复回复不能重复保存或继续两次")
+
+            dirty = true
+            _ = request()
+            queued.removeFirst()()
+            respond(2, .alertSecondButtonReturn)
+            expect(discards == 1 && !dirty && outcomes.last == true,
+                   "明确选择不保存才丢弃草稿并继续")
+            dirty = true
+            _ = request()
+            queued.removeFirst()()
+            respond(3, .abort)
+            expect(outcomes.last == false && dirty && saves == 1 && discards == 1,
+                   "父窗口消失或无法显示 sheet 时失败关闭，不丢弃草稿")
+
+            _ = request()
+            dirty = false
+            queued.removeFirst()()
+            expect(replies.count == 4 && outcomes.last == true && !coordinator.isPending,
+                   "排队期间草稿已被明确处理时不再弹过期确认")
+            expect(queued.isEmpty, "每次确认结束后没有遗留排队动作")
+        }
+    }
+
+    private static func settingsNavigationCommitsAfterConfirmation() {
+        MainActor.assumeIsolated {
+            var accepts = true
+            var completions: [(Bool) -> Void] = []
+            let navigation = SettingsNavigation { completion in
+                guard accepts else { return false }
+                completions.append(completion)
+                return true
+            }
+            @MainActor func reply(_ allowed: Bool) { completions.removeFirst()(allowed) }
+
+            navigation.sidebarSelection = .buttons
+            expect(navigation.selectedTab == .scroll && navigation.history == [.scroll]
+                   && navigation.isNavigationPending && completions.count == 1,
+                   "侧栏请求切页时正文和历史先保持原页，等待异步确认")
+            reply(false)
+            expect(navigation.selectedTab == .scroll && navigation.sidebarSelection == .scroll
+                   && !navigation.isNavigationPending && navigation.history == [.scroll],
+                   "取消切页恢复侧栏高亮，不能留下按键高亮但指针正文的错位")
+
+            navigation.select(.pointer)
+            navigation.sidebarSelection = .apps
+            expect(completions.count == 1 && navigation.selectedTab == .scroll,
+                   "确认期间重复导航不会覆盖第一目标或再提交确认")
+            reply(true)
+            expect(navigation.selectedTab == .pointer && navigation.sidebarSelection == .pointer
+                   && navigation.history == [.scroll, .pointer] && navigation.canGoBack,
+                   "允许离开后才同步提交正文、侧栏和历史")
+
+            navigation.goBack()
+            expect(navigation.historyIndex == 1 && !navigation.canGoBack && !navigation.canGoForward,
+                   "返回确认期间历史索引不提前移动，禁用重复前进后退")
+            reply(false)
+            expect(navigation.historyIndex == 1 && navigation.selectedTab == .pointer,
+                   "取消返回保留原历史位置")
+            navigation.goBack()
+            reply(true)
+            expect(navigation.selectedTab == .scroll && navigation.historyIndex == 0
+                   && navigation.history == [.scroll, .pointer] && navigation.canGoForward,
+                   "确认返回只移动索引，不能追加重复历史")
+            navigation.goForward()
+            reply(false)
+            expect(navigation.selectedTab == .scroll && navigation.canGoForward,
+                   "取消前进保留前向历史")
+            navigation.goForward()
+            reply(true)
+            expect(navigation.selectedTab == .pointer && navigation.history.count == 2,
+                   "确认前进恢复目标，历史条数不变")
+            navigation.select(.buttons)
+            reply(true)
+            navigation.goBack()
+            reply(true)
+            navigation.select(.general)
+            reply(false)
+            expect(navigation.history == [.scroll, .pointer, .buttons] && navigation.canGoForward,
+                   "在历史中间取消新导航不能截断前向历史")
+            navigation.select(.apps)
+            reply(true)
+            expect(navigation.history == [.scroll, .pointer, .apps] && !navigation.canGoForward,
+                   "确认新的分支后才截断旧前向历史")
+
+            navigation.select(.apps)
+            navigation.select(nil)
+            navigation.sidebarSelection = nil
+            expect(completions.isEmpty && navigation.sidebarSelection == .apps,
+                   "重复当前页和空选择不触发确认，也不能清空当前高亮")
+            accepts = false
+            navigation.sidebarSelection = .scroll
+            expect(navigation.selectedTab == .apps && navigation.sidebarSelection == .apps
+                   && !navigation.isNavigationPending && completions.isEmpty,
+                   "其他离开流程已占用确认时，拒绝导航并恢复一致选择")
         }
     }
 
