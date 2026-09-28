@@ -241,13 +241,17 @@ private struct SaveButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Text(hasUnsavedChanges ? Strings.settingsSave : Strings.settingsSaved)
+        if hasUnsavedChanges {
+            Button(Strings.settingsSave, action: action)
+                .buttonStyle(.borderedProminent)
+                .help(Strings.settingsSaveHelp)
+                .keyboardShortcut("s", modifiers: .command)
+        } else {
+            Label(Strings.settingsSaved, systemImage: "checkmark")
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(.secondary)
+                .help(Strings.settingsSavedHelp)
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(!hasUnsavedChanges)
-        .help(hasUnsavedChanges ? Strings.settingsSaveHelp : Strings.settingsSavedHelp)
-        .keyboardShortcut("s", modifiers: .command)
     }
 }
 

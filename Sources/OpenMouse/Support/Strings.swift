@@ -109,8 +109,13 @@ enum Strings {
 
     // Buttons pane
     static let buttonsSectionTitle = "鼠标按键"
-    static let buttonsIntro = "按下鼠标上的按键来录入，再为它选择动作。左键与右键不会被接管。录入时可以同时按住修饰键，"
-        + "为同一个按键配出不同组合，例如侧键 4 = 后退，⌘ + 侧键 4 = 调度中心。"
+    static let buttonsIntro = "为鼠标按键分配动作，左键与右键保持原样。"
+    static func buttonsMappingCount(_ count: Int) -> String { "\(count) 个映射" }
+    static let buttonsAction = "执行动作"
+    static let buttonsGestureHint = "按住此键并移动鼠标，使用手势导航。"
+    static let buttonsRecordingHelpTitle = "如何录入组合按键？"
+    static let buttonsRecordingHelp = "点击「录入按键」，再按下鼠标上的目标按键。录入时可同时按住 ⌘、⌥、⌃ 或 ⇧，"
+        + "为同一个按键设置不同动作，例如侧键 4 = 后退，⌘ + 侧键 4 = 调度中心。再次录入同一组合会定位到已有映射。"
     static let buttonsEmptyTitle = "还没有录入任何按键"
     static let buttonsEmptyBody = "不预设按键列表——不同鼠标能报出的按键并不一样。按一下你想用的键，它就会出现在这里。"
     static let buttonsRecord = "录入按键"
@@ -131,6 +136,9 @@ enum Strings {
     static func dpiValue(_ value: Int) -> String { "\(value) DPI" }
     static func dpiCurrentValue(_ value: Int) -> String { "当前 \(value) DPI" }
     static func dpiCurrentHelp(_ value: Int) -> String { "当前鼠标正在使用 \(value) DPI" }
+    static let dpiLowerLevel = "档位一"
+    static let dpiUpperLevel = "档位二"
+    static let dpiCurrentUnknown = "当前 DPI 暂不可用"
     static let dpiChangeHelp = "点击修改 DPI"
     static let dpiCurrentAccessibilityValue = "当前使用"
     static let dpiInactiveAccessibilityValue = "未使用"

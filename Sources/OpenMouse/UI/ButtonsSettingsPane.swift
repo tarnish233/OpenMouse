@@ -10,6 +10,7 @@ struct ButtonsSettingsPane: View {
     @State private var engine = MouseEngine.shared
     @State private var isRecording = false
     @State private var highlightedID: UUID?
+    @State private var showsRecordingHelp = false
 
     var body: some View {
         Form {
@@ -36,21 +37,44 @@ struct ButtonsSettingsPane: View {
                             onRemove: { remove(binding) }
                         )
                     }
-                    Button {
-                        isRecording = true
-                    } label: {
-                        Label(Strings.buttonsRecord, systemImage: "plus")
-                    }
-                    .controlSize(.small)
-                    .buttonStyle(.borderless)
                 }
             } header: {
-                Text(Strings.buttonsSectionTitle)
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text(Strings.buttonsSectionTitle)
+                            if !store.preferences.buttons.isEmpty {
+                                Text(Strings.buttonsMappingCount(store.preferences.buttons.count))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Text(Strings.buttonsIntro)
+                            .font(.caption)
+                            .fontWeight(.regular)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if !store.preferences.buttons.isEmpty {
+                        Button { isRecording = true } label: {
+                            Label(Strings.buttonsRecord, systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+                        .fixedSize()
+                    }
+                }
+                .textCase(nil)
             } footer: {
-                Text(Strings.buttonsIntro)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup(isExpanded: $showsRecordingHelp) {
+                    Text(Strings.buttonsRecordingHelp)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                } label: {
+                    Text(Strings.buttonsRecordingHelpTitle)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -101,11 +125,11 @@ private struct BindingRow: View {
     let onRemove: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             ButtonBadge(button: binding.button, modifiers: binding.modifiers)
                 .overlay {
                     if isHighlighted {
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: 7)
                             .stroke(.tint, lineWidth: 2)
                     }
                 }
@@ -113,17 +137,22 @@ private struct BindingRow: View {
             Image(systemName: "arrow.right")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
+                .frame(height: 32)
+                .accessibilityHidden(true)
 
-            ActionRow(action: $binding.action, currentDPI: currentDPI)
+            ActionEditor(action: $binding.action, currentDPI: currentDPI)
 
             Button(role: .destructive) { onRemove() } label: {
-                Image(systemName: "minus.circle")
+                Image(systemName: "trash")
+                    .frame(width: 24, height: 32)
+                    .contentShape(Rectangle())
             }
-            .controlSize(.small)
             .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
             .help(Strings.buttonsRemove)
+            .accessibilityLabel(Strings.buttonsRemove)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 8)
     }
 }
 
@@ -133,19 +162,19 @@ private struct ButtonBadge: View {
     let modifiers: UInt64
 
     var body: some View {
-        HStack(spacing: 3) {
+        VStack(spacing: 2) {
             if modifiers != 0 {
                 Text(KeyCodeNames.modifierGlyphs(modifiers))
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
             }
             Text(Strings.buttonName(button))
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12, weight: .semibold))
         }
         .monospacedDigit()
-        .frame(minWidth: 52, alignment: .center)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 6))
+        .frame(width: 88)
+        .frame(minHeight: 32)
+        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 7))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -217,19 +246,12 @@ private struct ButtonRecorderSheet: View {
 
 // MARK: - Action picker with payload editors
 
-private struct ActionRow: View {
+private struct ActionEditor: View {
     @Binding var action: MouseAction
     let currentDPI: Int?
 
-    private var kind: Binding<ActionKind> {
-        Binding(
-            get: { ActionKind(action) },
-            set: { action = $0.makeAction(preserving: action) }
-        )
-    }
-
     var body: some View {
-        HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             // A flat picker with dozens of actions is an unusable ribbon of text. Grouping
             // them into submenus keeps the whole list two clicks away and one screen tall,
             // with the default sitting at the top level where it is one click.
@@ -246,12 +268,33 @@ private struct ActionRow: View {
                     }
                 }
             } label: {
-                Text(ActionKind(action).title)
+                HStack(spacing: 8) {
+                    Text(ActionKind(action).title)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            // Plain button style preserves the full-width label; the AppKit borderless
+            // menu style extracts its title/image and discards the custom layout.
             .menuStyle(.button)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .fixedSize()
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .background(Color(nsColor: .controlBackgroundColor), in: .rect(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(.primary.opacity(0.08))
+                    .allowsHitTesting(false)
+            }
+            .accessibilityLabel(Strings.buttonsAction)
+            .accessibilityValue(ActionKind(action).title)
 
             switch action {
             case let .toggleDPI(levels):
@@ -259,10 +302,15 @@ private struct ActionRow: View {
                     levels: levelsBinding(levels),
                     currentDPI: currentDPI
                 )
+            case .gestureNavigation:
+                Text(Strings.buttonsGestureHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             case .keyStroke:
                 ShortcutRecorderView(combo: comboBinding)
             case let .launchApp(path):
-                HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Button(Strings.buttonChooseApp) { chooseApp() }
                         .controlSize(.small)
                     Text(path.isEmpty ? Strings.buttonNoAppChosen : (path as NSString).lastPathComponent)
@@ -330,39 +378,45 @@ private struct DPIToggleEditor: View {
     let currentDPI: Int?
 
     var body: some View {
-        HStack(spacing: 8) {
-            DPIValueMenu(
-                value: levels.lower,
-                choices: lowerChoices,
-                isCurrent: activeDPI == levels.lower,
-                onSelect: { levels = LogitechDPILevels(lower: $0, upper: levels.upper) }
-            )
-
-            Image(systemName: "arrow.left.arrow.right")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-
-            DPIValueMenu(
-                value: levels.upper,
-                choices: upperChoices,
-                isCurrent: activeDPI == levels.upper,
-                onSelect: { levels = LogitechDPILevels(lower: levels.lower, upper: $0) }
-            )
-
-            if let currentDPI, activeDPI == nil {
-                Text(Strings.dpiCurrentValue(currentDPI))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 8) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(Strings.dpiLowerLevel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    DPIValueMenu(
+                        value: levels.lower,
+                        choices: lowerChoices,
+                        currentDPI: currentDPI,
+                        onSelect: { levels = LogitechDPILevels(lower: $0, upper: levels.upper) }
+                    )
+                }
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .frame(height: 28)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(Strings.dpiUpperLevel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    DPIValueMenu(
+                        value: levels.upper,
+                        choices: upperChoices,
+                        currentDPI: currentDPI,
+                        onSelect: { levels = LogitechDPILevels(lower: levels.lower, upper: $0) }
+                    )
+                }
             }
-        }
-        .fixedSize()
-        .accessibilityElement(children: .contain)
-    }
+            .frame(maxWidth: 280, alignment: .leading)
 
-    private var activeDPI: Int? {
-        levels.activeLevel(for: currentDPI)
+            Text(currentDPI.map(Strings.dpiCurrentValue) ?? Strings.dpiCurrentUnknown)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .contain)
     }
 
     private var lowerChoices: [Int] {
@@ -377,32 +431,33 @@ private struct DPIToggleEditor: View {
 private struct DPIValueMenu: View {
     let value: Int
     let choices: [Int]
-    let isCurrent: Bool
+    let currentDPI: Int?
     let onSelect: (Int) -> Void
 
+    private var isCurrent: Bool { currentDPI == value }
+
     var body: some View {
-        Group {
-            if isCurrent {
-                menu
-                    .menuStyle(.borderlessButton)
-                    .frame(minWidth: 78, minHeight: 24)
-                    .background(Color.accentColor, in: .rect(cornerRadius: 6))
-            } else {
-                menu
-                    .menuStyle(.button)
-                    .buttonStyle(.bordered)
+        menu
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .controlSize(.small)
+            .background(
+                isCurrent ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.04),
+                in: .rect(cornerRadius: 6)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(isCurrent ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.08))
+                    .allowsHitTesting(false)
             }
-        }
-        .menuIndicator(.hidden)
-        .controlSize(.small)
-        .fixedSize()
-        .help(isCurrent ? Strings.dpiCurrentHelp(value) : Strings.dpiChangeHelp)
-        .accessibilityLabel(Strings.dpiValue(value))
-        .accessibilityValue(
-            isCurrent
-                ? Strings.dpiCurrentAccessibilityValue
-                : Strings.dpiInactiveAccessibilityValue
-        )
+            .help(isCurrent ? Strings.dpiCurrentHelp(value) : Strings.dpiChangeHelp)
+            .accessibilityLabel(Strings.dpiValue(value))
+            .accessibilityValue(
+                currentDPI == nil
+                    ? Strings.dpiCurrentUnknown
+                    : (isCurrent ? Strings.dpiCurrentAccessibilityValue : Strings.dpiInactiveAccessibilityValue)
+            )
     }
 
     private var menu: some View {
@@ -419,11 +474,19 @@ private struct DPIValueMenu: View {
                 }
             }
         } label: {
-            Text(verbatim: Strings.dpiValue(value))
-                .font(.system(size: 12, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(isCurrent ? Color.white : Color.primary)
-                .frame(minWidth: 78)
+            HStack(spacing: 6) {
+                Text(verbatim: Strings.dpiValue(value))
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .contentShape(Rectangle())
         }
     }
 }
