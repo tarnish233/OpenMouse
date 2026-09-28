@@ -60,6 +60,34 @@ enum LogitechHIDPPProtocol {
     }
 }
 
+/// Device discovery must never open every Logitech interface. A keyboard seized by
+/// Karabiner would otherwise make IOHIDManagerOpen fail for the mouse as well, before
+/// the per-device callback has a chance to reject that keyboard.
+///
+/// Independent devices keep discovery separate from access: only an accepted mouse's
+/// session opens/schedules it, and an inaccessible mouse cannot stop other sessions.
+enum LogitechHIDPPDevicePolicy {
+    static let vendorID = 0x046D
+    static let managerOptions = IOHIDManagerOptions.independentDevices.rawValue
+    static let matchingCriteria: [String: Int] = [
+        kIOHIDVendorIDKey: vendorID,
+        kIOHIDDeviceUsagePageKey: 0x0001,
+        kIOHIDDeviceUsageKey: 0x0002
+    ]
+
+    static func accepts(
+        vendorID: Int,
+        primaryUsagePage: Int,
+        primaryUsage: Int,
+        transport: String
+    ) -> Bool {
+        vendorID == Self.vendorID
+            && primaryUsagePage == 0x0001
+            && primaryUsage == 0x0002
+            && transport.lowercased().contains("bluetooth")
+    }
+}
+
 /// Minimal, clean-room HID++ 2.0 input support for Logitech mice.
 ///
 /// The normal CGEvent path is still the default for generic mice. Logitech BLE mice are a
@@ -75,7 +103,6 @@ final class LogitechHIDPPManager {
     typealias ButtonHandler = (_ button: Int, _ isDown: Bool) -> Void
     typealias DPIHandler = (_ currentDPI: Int?) -> Void
 
-    private static let vendorID = 0x046D
     private static let log = Logger(subsystem: "com.openmouse.OpenMouse", category: "hidpp")
 
     private let onButton: ButtonHandler
@@ -97,11 +124,14 @@ final class LogitechHIDPPManager {
 
     func start() {
         guard !isRunning else { return }
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let manager = IOHIDManagerCreate(
+            kCFAllocatorDefault,
+            LogitechHIDPPDevicePolicy.managerOptions
+        )
         self.manager = manager
         IOHIDManagerSetDeviceMatching(
             manager,
-            [kIOHIDVendorIDKey as String: Self.vendorID] as CFDictionary
+            LogitechHIDPPDevicePolicy.matchingCriteria as CFDictionary
         )
         let context = Unmanaged.passUnretained(self).toOpaque()
         IOHIDManagerRegisterDeviceMatchingCallback(manager, Self.deviceMatched, context)
@@ -119,6 +149,7 @@ final class LogitechHIDPPManager {
                 CFRunLoopGetMain(),
                 CFRunLoopMode.commonModes.rawValue
             )
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
             self.manager = nil
             return
         }
@@ -196,8 +227,12 @@ final class LogitechHIDPPManager {
 
         // BLE HID++ shares the regular mouse interface. Other standard interfaces, notably
         // keyboards, must not be opened merely because they use Logitech's vendor ID.
-        guard transport.lowercased().contains("bluetooth"),
-              usagePage == 0x0001, usage == 0x0002 else { return }
+        guard LogitechHIDPPDevicePolicy.accepts(
+            vendorID: propertyInt(device, kIOHIDVendorIDKey),
+            primaryUsagePage: usagePage,
+            primaryUsage: usage,
+            transport: transport
+        ) else { return }
 
         let session = LogitechHIDPPDeviceSession(
             device: device,
@@ -338,6 +373,14 @@ private final class LogitechHIDPPDeviceSession {
             Unmanaged.passUnretained(self).toOpaque()
         )
 
+        // The discovery manager deliberately does not schedule/open its devices. Each
+        // accepted session owns its report delivery, including hot-plugged mice.
+        IOHIDDeviceScheduleWithRunLoop(
+            device,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
+
         Self.log.notice("device connected name=\(self.name, privacy: .public) pid=0x\(String(self.productID, radix: 16), privacy: .public)")
         stage = .feature
         armTimeout(label: "feature discovery")
@@ -362,6 +405,14 @@ private final class LogitechHIDPPDeviceSession {
         divertedCIDs.removeAll()
         onOwnershipChanged()
         if opened {
+            IOHIDDeviceUnscheduleFromRunLoop(
+                device,
+                CFRunLoopGetMain(),
+                CFRunLoopMode.commonModes.rawValue
+            )
+            if let reportBuffer {
+                IOHIDDeviceRegisterInputReportCallback(device, reportBuffer, 64, nil, nil)
+            }
             IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
             opened = false
         }

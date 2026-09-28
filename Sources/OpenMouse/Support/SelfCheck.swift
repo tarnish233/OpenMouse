@@ -2,6 +2,8 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import IOKit
+import IOKit.hid
 import OpenMouseUpdateSupport
 
 /// Self-contained assertion checks for the pure logic in this app: the easing curve, the
@@ -139,6 +141,8 @@ enum SelfCheck {
             routesHardwareActions()
         }
         group("Logi HID++") {
+            hidppDiscoveryDoesNotOpenKeyboards()
+            hidppAcceptsOnlySupportedMouseInterfaces()
             hidppEncodesDivertWithoutRemapping()
             hidppIncludesDpiSwitchDuringCapture()
             hidppEncodesDPIAndChoosesOtherLevel()
@@ -1027,6 +1031,46 @@ enum SelfCheck {
         _ = router.handleButton(type: .otherMouseUp, event: up)
         expect(hardwareActions == [action], "切换 DPI 动作被交给硬件处理器一次")
         expect(ordinaryActions.isEmpty, "硬件动作不会同时落入系统按键合成路径")
+    }
+
+    private static func hidppDiscoveryDoesNotOpenKeyboards() {
+        let matching = LogitechHIDPPDevicePolicy.matchingCriteria
+        expect(matching[kIOHIDVendorIDKey] == 0x046D, "HID++ 发现仅匹配罗技设备")
+        expect(matching[kIOHIDDeviceUsagePageKey] == 0x0001, "HID++ 发现限定 Generic Desktop usage page")
+        expect(matching[kIOHIDDeviceUsageKey] == 0x0002, "HID++ 在打开前就限定鼠标，不枚举所有罗技键盘")
+        expect(
+            LogitechHIDPPDevicePolicy.managerOptions & IOHIDManagerOptions.independentDevices.rawValue != 0,
+            "HID++ manager 不自动打开或调度设备，单个设备被独占不会阻断其他鼠标"
+        )
+    }
+
+    private static func hidppAcceptsOnlySupportedMouseInterfaces() {
+        func accepts(
+            vendorID: Int = 0x046D,
+            page: Int = 0x0001,
+            usage: Int = 0x0002,
+            transport: String = "Bluetooth Low Energy"
+        ) -> Bool {
+            LogitechHIDPPDevicePolicy.accepts(
+                vendorID: vendorID,
+                primaryUsagePage: page,
+                primaryUsage: usage,
+                transport: transport
+            )
+        }
+        expect(accepts(), "M750 L 的 BLE 鼠标接口可以建立独立 HID++ 会话")
+        expect(accepts(transport: "Bluetooth"), "保留现有 Bluetooth transport 支持")
+        expect(accepts(transport: "bluetooth low energy"), "Bluetooth transport 检查不区分大小写")
+        expect(
+            !accepts(usage: 0x0006, transport: "Bluetooth"),
+            "Karabiner 接管的罗技蓝牙键盘被排除，不尝试打开"
+        )
+        expect(!accepts(usage: 0x0007), "罗技 keypad 接口不进入鼠标 HID++ 会话")
+        expect(!accepts(page: 0x000C, usage: 0x0001), "罗技 Consumer Control 接口不进入鼠标 HID++ 会话")
+        expect(!accepts(transport: "USB"), "USB 接收器不被误当成直连 BLE 鼠标打开")
+        expect(!accepts(vendorID: 0x05AC), "其他厂商的蓝牙鼠标不会被罗技 HID++ 接管")
+        expect(!accepts(transport: ""), "缺失 transport 的设备不会被试探性打开")
+        expect(!accepts(page: 0, usage: 0), "缺失 usage 的设备不会被试探性打开")
     }
 
     private static func hidppEncodesDivertWithoutRemapping() {
