@@ -45,6 +45,7 @@ test:
 	swift run -c debug OpenMouseUpdater --self-check
 	./Scripts/test-distribution-signature.sh
 	./Scripts/test-community-signature.sh
+	./Scripts/test-build-metadata.sh
 
 ## Zip the signed bundle for a GitHub release.
 ## ditto, not zip: it preserves the bundle's signature and resource forks.

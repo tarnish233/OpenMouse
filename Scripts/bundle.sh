@@ -43,12 +43,34 @@ if [ "$DISTRIBUTION" = "1" ] && [ -z "${CODESIGN_IDENTITY:-}" ]; then
   exit 1
 fi
 
-echo "==> swift build -c $CONFIG"
-swift build -c "$CONFIG"
-BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$EXECUTABLE"
-UPDATER_BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$UPDATER_EXECUTABLE"
+# Xcode 27 / Swift Build can emit the deployment target as LC_BUILD_VERSION.sdk.
+# That opts AppKit/SwiftUI into legacy window chrome even though compilation uses
+# the current SDK (v0.7.5 reproduced a misaligned sidebar/titlebar separator).
+# Set both versions at link time, not by patching a signed executable afterward.
+MACOS_SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+MACOS_SDK_VERSION="$(xcrun --sdk "$MACOS_SDK_PATH" --show-sdk-version)"
+MINIMUM_MACOS_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$ROOT/Resources/Info.plist")"
+BUILD_ARGUMENTS=(
+  build -c "$CONFIG" --sdk "$MACOS_SDK_PATH"
+  -Xlinker -platform_version -Xlinker macos
+  -Xlinker "$MINIMUM_MACOS_VERSION" -Xlinker "$MACOS_SDK_VERSION"
+)
+
+echo "==> swift build -c $CONFIG (SDK $MACOS_SDK_VERSION, minimum macOS $MINIMUM_MACOS_VERSION)"
+xcrun swift "${BUILD_ARGUMENTS[@]}"
+BIN_DIR="$(xcrun swift "${BUILD_ARGUMENTS[@]}" --show-bin-path)"
+BIN_PATH="$BIN_DIR/$EXECUTABLE"
+UPDATER_BIN_PATH="$BIN_DIR/$UPDATER_EXECUTABLE"
 [ -f "$BIN_PATH" ] || { echo "build product not found at $BIN_PATH" >&2; exit 1; }
 [ -f "$UPDATER_BIN_PATH" ] || { echo "updater product not found at $UPDATER_BIN_PATH" >&2; exit 1; }
+
+# Fail before replacing an existing bundle. Check both binaries and every slice;
+# a successful compile or valid code signature does not prove the SDK is correct.
+for binary in "$BIN_PATH" "$UPDATER_BIN_PATH"; do
+  echo "==> validating build metadata: $(basename "$binary")"
+  xcrun vtool -show-build "$binary" \
+    | "$ROOT/Scripts/validate-build-metadata.sh" "$MACOS_SDK_VERSION" "$MINIMUM_MACOS_VERSION"
+done
 
 echo "==> assembling $APP"
 rm -rf "$APP"

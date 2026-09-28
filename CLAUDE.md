@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 416 项 + 更新助手自检 + 正式/社区发布签名检查，必须全过
+make test     # 应用自检 434 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -25,6 +25,12 @@ make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成�
 只想快速编译看有没有语法/类型错误：`swift build -c release`（不组装不签名，最快）。
 
 版本号的唯一来源是 `Resources/Info.plist` 的 `CFBundleShortVersionString`，`make dist` 从那里读。更新版本比较返回三态（新/不新/无法判断），无法解析时必须报失败且不能写入 24 小时抑制时间。自动检查由一次性定时器按持久化时间安排，并在系统唤醒后重新核对；不能只在启动时调用一次。
+
+### 构建 SDK 与最低系统版本
+
+`Scripts/bundle.sh` 从当前选定的 macOS SDK 读取路径和版本，从 `Info.plist` 的 `LSMinimumSystemVersion` 读取最低版本，并通过链接器 `-platform_version` 分别传入。**不能把 SDK 版本写成最低支持系统版本**：v0.7.5 在 Xcode 27 的 Swift Build 后端上实际生成了 `minos 14.0 / sdk 14.0`，使 macOS 27 回退到旧窗口样式，并出现标题栏与侧栏分隔线错位。
+
+主程序和更新助手在组装、签名前都必须通过 `validate-build-metadata.sh`，所有架构的 SDK 和最低版本都要与构建配置一致。不能用改 `padding`、提高最低系统要求或事后修改已签名二进制来绕过。`make test` 覆盖错误 SDK、错误最低版本、不完整/多架构元数据，以及坏主程序/助手在覆盖现有 bundle 前被阻止的回归。
 
 ### 跑测试
 
