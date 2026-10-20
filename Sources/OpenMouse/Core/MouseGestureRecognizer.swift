@@ -58,16 +58,38 @@ enum MouseGestureCompletion: Equatable, Sendable {
 /// This recognizer decides whether the hold is a click and which axis owns the drag. EventRouter
 /// converts the first locked-axis delta to one action, matching the observed Logi Options+
 /// contract: one command per physical hold, independent of movement speed or later reversal.
+///
+/// The two axes are deliberately not symmetric. Horizontal switches desktops and is the gesture
+/// used all day, so it engages early. Vertical opens Mission Control or Application Windows,
+/// and both are modal: while either is on screen, Control-Arrow does nothing — ours and the
+/// keyboard's alike — so a false vertical lock reads as "desktop switching is broken" until the
+/// user notices and dismisses it.
 struct MouseGestureRecognizer {
     /// A small dead zone keeps a stationary side-button click usable while making the animation
     /// engage much earlier than the old 40-point one-shot recognizer. Mac Mouse Fix uses a
     /// similarly small modified-drag threshold.
     static let defaultActivationDistance: Double = 7
-    /// One axis must beat the other by this factor, so diagonal drift does not pick for you.
+    /// Horizontal must beat vertical by this factor, so diagonal drift does not pick for you.
     static let defaultDominanceRatio: Double = 1.2
+    /// Vertical needs twice the horizontal distance, to absorb the wobble of pressing the button.
+    ///
+    /// Field trace, 2026-10-19 18:28:04, M750 over Bluetooth: the press drifted (−2, 1), (0, 3),
+    /// (1, 2), (5, 3) — 9 px down against 4 px across within 22 ms — and only then turned into a
+    /// 248 px swipe. The symmetric 7 px / 1.2× rule locked "down", Application Windows opened,
+    /// and the next three swipes plus two Control-Arrow presses on the keyboard all did nothing
+    /// until a click dismissed it. Replaying the logged motion of all 310 holds from that session
+    /// through this rule changes exactly one decision — that one; every horizontal lock lands on
+    /// the same sample as before and every click stays a click.
+    static let defaultVerticalActivationDistance: Double = 14
+    /// Vertical must be at least twice horizontal. 2:1 is Logi Options+'s own axis rule: its
+    /// `GestureTriggerBaseState::AngleSnapping` only credits a motion sample to an axis when it is
+    /// at least twice the other ("30 degrees angle snapping range").
+    static let defaultVerticalDominanceRatio: Double = 2
 
     private let activationDistance: Double
     private let dominanceRatio: Double
+    private let verticalActivationDistance: Double
+    private let verticalDominanceRatio: Double
 
     private(set) var displacement = CGPoint.zero
     private(set) var maximumDistanceFromOrigin: Double = 0
@@ -78,10 +100,14 @@ struct MouseGestureRecognizer {
 
     init(
         activationDistance: Double = defaultActivationDistance,
-        dominanceRatio: Double = defaultDominanceRatio
+        dominanceRatio: Double = defaultDominanceRatio,
+        verticalActivationDistance: Double = defaultVerticalActivationDistance,
+        verticalDominanceRatio: Double = defaultVerticalDominanceRatio
     ) {
         self.activationDistance = activationDistance
         self.dominanceRatio = dominanceRatio
+        self.verticalActivationDistance = verticalActivationDistance
+        self.verticalDominanceRatio = verticalDominanceRatio
     }
 
     /// Anchor the gesture at the location of the press that started it.
@@ -150,11 +176,13 @@ struct MouseGestureRecognizer {
             axis = .horizontal
             return .began(axis: .horizontal, pixelDelta: displacement.x)
         }
-        if vertical >= horizontal * dominanceRatio {
+        if vertical >= verticalActivationDistance,
+           vertical >= horizontal * verticalDominanceRatio {
             axis = .vertical
             return .began(axis: .vertical, pixelDelta: displacement.y)
         }
-        // Too diagonal to call yet; keep accumulating.
+        // Too diagonal to call yet, or vertical but still within the press-wobble zone; keep
+        // accumulating. A real swipe either keeps going and resolves, or the release is a click.
         return nil
     }
 

@@ -348,6 +348,7 @@ struct ActionRunner {
     /// Control+Fn+Arrow down, Fn+Arrow up, then a flags-changed edge that clears Fn. The system
     /// reacts to the first edge; preserving the full sequence avoids leaving synthetic modifier
     /// state behind and makes a second physical hold valid during the first Space animation.
+    /// When each event goes out is `gestureSpaceEventDelays`, not this builder's concern.
     static func gestureSpaceEvents(
         keyCode: UInt16,
         flags: CGEventFlags,
@@ -365,13 +366,64 @@ struct ActionRunner {
         return [down, up, clear]
     }
 
+    /// How long the arrow stays down in a desktop-switch stroke.
+    ///
+    /// 2026-10-20, macOS 27.0.1: `logioptionsplus_agent` (Logi Options+ 2.9) posted exactly the
+    /// three events of `gestureSpaceEvents`, but with key-up a median 14 ms after key-down (31
+    /// strokes seen by a session tap, 2–84 ms with delivery jitter) and the flags clear about
+    /// 1 ms after that; its `virtual_input_osx::send_hid_keyboard` calls `usleep(10000)` between
+    /// the two edges. The 2026-08-31 trace that defined the shape did not record timing, so this
+    /// app posted all three back to back — a key press no physical key can produce. No failure
+    /// was traced to that: every unanswered request in the 2026-10-19 session was the last Space
+    /// on its display or an open App Exposé. It is an avoidable difference from the reference
+    /// implementation, and removing it costs one 10 ms sleep on a queue nobody waits for.
+    static let gestureSpaceKeyHold: TimeInterval = 0.010
+
+    /// Delay before each event of `gestureSpaceEvents`: key-down at once, key-up after the hold,
+    /// the flags clear straight after the key-up.
+    static let gestureSpaceEventDelays: [TimeInterval] = [0, gestureSpaceKeyHold, 0]
+
+    /// The hold must never run on the main thread: both event taps and the gesture motion tap
+    /// are served by the main run loop, and constraint 12 exists because a stalled callback gets
+    /// the tap disabled. Serial, so a stroke is atomic — a second stroke's key-down can never land
+    /// between the first one's key-down and key-up.
+    private static let gestureSpaceQueue = DispatchQueue(
+        label: "com.openmouse.OpenMouse.gesture-space-stroke",
+        qos: .userInteractive
+    )
+
+    /// Post one desktop-switch stroke asynchronously with `gestureSpaceEventDelays`. The queue
+    /// and posting edge are injectable so the self-check can prove ordering, the hold, and that
+    /// nothing is posted on the caller's thread.
+    static func deliverGestureSpaceEvents(
+        _ events: [CGEvent],
+        on queue: DispatchQueue = gestureSpaceQueue,
+        post: @escaping (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }
+    ) {
+        let delays = gestureSpaceEventDelays
+        queue.async {
+            for (index, event) in events.enumerated() {
+                // An event beyond the delay table still goes out; never drop a key-up.
+                let delay = index < delays.count ? delays[index] : 0
+                if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+                post(event)
+            }
+        }
+    }
+
+    /// Let an in-flight stroke finish before the process exits, so a quit can never land
+    /// between a key-down and its key-up. Waits for at most one hold.
+    static func flushPendingGestureSpaceStrokes() {
+        gestureSpaceQueue.sync {}
+    }
+
     private func gestureSpaceKeyStroke(_ keyCode: UInt16, flags: CGEventFlags) {
         guard let events = Self.gestureSpaceEvents(
             keyCode: keyCode,
             flags: flags,
             source: source
         ) else { return }
-        for event in events { event.post(tap: .cghidEventTap) }
+        Self.deliverGestureSpaceEvents(events)
     }
 
     /// Build one media-key edge without posting it, so the marker invariant is testable.

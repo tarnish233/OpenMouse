@@ -591,7 +591,8 @@ final class EventRouter {
             )
             // `append` mutates the dead-zone displacement and previous location even when it
             // does not emit an update. Persist that state; otherwise 4 px + 4 px never reaches
-            // the 7 px threshold and location-only devices keep differencing from stale data.
+            // the 7 px horizontal threshold and location-only devices keep differencing from
+            // stale data.
             gestureSessions[button] = session
             guard let update else { continue }
 

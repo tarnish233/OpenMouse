@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 554 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
+make test     # 应用自检 571 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -244,9 +244,11 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 
 **不能只读增量字段。** 某些鼠标发的 `otherMouseDragged` 三个增量字段全是 0，只读它们的话累积位移永远是 0，每次按住都被判成「原地单击」。识别器用事件坐标做差分，增量字段非零时才优先采信（屏幕边缘会夹住坐标，那时差分为 0 而增量字段仍然对）。
 
-阈值：7px 后锁轴，某轴要比另一轴多 1.2 倍（避免斜划乱猜）。锁轴的第一个带符号增量立即映射为一个动作：上 = 调度中心、下 = 应用程序窗口、左 = 右桌面、右 = 左桌面。**一次按住只触发一次**；同一按住中的继续移动和反向都忽略。松开重按才开始下一次识别，且桌面动作直接走 `ActionRunner.runGestureNavigation`，不能进入 `SpaceSwitchPacer`。
+阈值两轴刻意不对称：横向 7px 后锁轴且要比纵向多 1.2 倍（避免斜划乱猜）；纵向要 14px 且至少是横向 2 倍（2:1 取自 Logi `GestureTriggerBaseState::AngleSnapping`）。纵向打开的调度中心 / 应用程序窗口是模态的，开着时我们和键盘的 Control+方向键都无效；2026-10-19 18:28:04 按侧键的抖动（9px 下、4px 横）被旧的对称规则锁成「下」，之后连续划和键盘都没反应，直到单击关掉它。不要为了「对称」把纵向门槛改回去。锁轴的第一个带符号增量立即映射为一个动作：上 = 调度中心、下 = 应用程序窗口、左 = 右桌面、右 = 左桌面。**一次按住只触发一次**；同一按住中的继续移动和反向都忽略。松开重按才开始下一次识别，且桌面动作直接走 `ActionRunner.runGestureNavigation`，不能进入 `SpaceSwitchPacer`。
 
-采样到的 Logi 左右桌面序列是：`keyDown(Control+Fn+Arrow)` → `keyUp(Fn+Arrow)` → `flagsChanged(0)`，来源状态为 `.hidSystemState`。`ActionRunner.gestureSpaceEvents` 保持这个形状。没有发现 Logi 发 `type 29/30` Dock-swipe 或滚轮动量来完成桌面切换。`DockSwipeSynthesizer` 仅保留为私有协议诊断与编码实验（来源和许可证见 `THIRD_PARTY_NOTICES.md`），**不得接回生产手势路径**；实测强行补 progress 会造成跳跃且仍无法复现 Logi 的提交行为。
+采样到的 Logi 左右桌面序列是：`keyDown(Control+Fn+Arrow)` → `keyUp(Fn+Arrow)` → `flagsChanged(0)`，来源状态为 `.hidSystemState`。`ActionRunner.gestureSpaceEvents` 保持这个形状。2026-10-20 在 macOS 27.0.1 上复测 Logi Options+ 2.9：形状相同，但 keyUp 比 keyDown 晚（中位数 14ms，n=31；agent 里是 `usleep(10000)`），flagsChanged 紧随 keyUp。现在按 `gestureSpaceEventDelays`（0 / 10ms / 0）在专用串行队列上投递：不占事件 tap 所在的主线程，两次切换不交错，退出时 `flushPendingGestureSpaceStrokes()` 等在途按键发完。没有证据表明 0ms 导致过失败，这是为了与参考实现一致。
+
+**到头静默是系统行为。** 「显示器具有单独的空间」开启时，Control+方向键只切换指针所在那块屏；那块屏已在第一个 / 最后一个空间时，macOS 27 不回弹、不报错，Open Mouse、Logi、键盘完全一样。排查「划了没反应」先核对 Dock 日志 `com.apple.dock:expose` 的 `WM space-change deltas … becameCurrent(<id>)` 和 `com.apple.dock:missioncontrol` 的模式切换，详见 `docs/gesture-navigation-2026-10-20.md`。没有发现 Logi 发 `type 29/30` Dock-swipe 或滚轮动量来完成桌面切换。`DockSwipeSynthesizer` 仅保留为私有协议诊断与编码实验（来源和许可证见 `THIRD_PARTY_NOTICES.md`），**不得接回生产手势路径**；实测强行补 progress 会造成跳跃且仍无法复现 Logi 的提交行为。
 
 **被吞掉的按下拥有它的抬起。** `EventRouter` 在 mouse-down 时记录 claim；mouse-up 只按这份会话状态收尾，不能重新解析当时的修饰键、绑定或前台应用。任何 tap 重建、权限丢失、引擎关闭与自动恢复都必须经统一 teardown 清掉 claim、gesture session、motion tap 和权限轮询。
 

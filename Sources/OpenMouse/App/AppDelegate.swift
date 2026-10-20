@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MouseEngine.shared.stop()
+        // A desktop-switch stroke holds its arrow for 10 ms on a background queue. Exiting in
+        // that window would leave the system with a synthetic key-down that never came up.
+        ActionRunner.flushPendingGestureSpaceStrokes()
         // Hands every device we changed back to the system value. A quit that left our
         // acceleration behind would be indistinguishable from macOS itself misbehaving.
         PointerSpeedController.shared.stop()

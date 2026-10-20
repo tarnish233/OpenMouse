@@ -156,6 +156,7 @@ enum SelfCheck {
             ignoresDiagonalDrift()
             keepsAxisLockedAfterFirstDirection()
             treatsStillHoldAsClick()
+            pressWobbleDoesNotOpenApplicationWindows()
             mapsDirectionsLikeLogiOptions()
             measuresFromLocationWhenDeltasAreEmpty()
             prefersDeltaFieldsWhenPresent()
@@ -235,6 +236,7 @@ enum SelfCheck {
         group("系统快捷键") {
             windowManagementStrokesCarryFn()
             gestureSpaceStrokeMatchesLogiTrace()
+            gestureSpaceStrokeHoldsKeyLikeLogi()
             rejectsInvalidSystemHotkeyNumbers()
         }
         group("草稿与保存") {
@@ -1340,8 +1342,9 @@ enum SelfCheck {
                 firstUpdate = firstUpdate ?? update
             }
         }
+        // Vertical needs 14 px, so the second 10 px sample is the one that locks.
         expect(
-            firstUpdate == .began(axis: .vertical, pixelDelta: -10),
+            firstUpdate == .began(axis: .vertical, pixelDelta: -20),
             "位移字段为 0 时改用事件坐标测量，仍能锁定纵轴"
         )
         expectClose(recognizer.maximumDistanceFromOrigin, 80, "累积位移取自坐标差")
@@ -1449,6 +1452,68 @@ enum SelfCheck {
         _ = roundTrip.append(deltaX: 3, deltaY: 0)
         _ = roundTrip.append(deltaX: -3, deltaY: 0)
         expect(roundTrip.completion == .click, "死区内往返手抖也有确定的单击结果")
+    }
+
+    /// Regression for 2026-10-19 18:28:04: pressing the side button drifted the M750 9 px down
+    /// and 4 px across before a 248 px swipe. The symmetric rule locked "down", Application
+    /// Windows opened, and every swipe and keyboard Control-Arrow after it did nothing until a
+    /// click dismissed it. Vertical is modal, so it has to earn its lock.
+    private static func pressWobbleDoesNotOpenApplicationWindows() {
+        expect(
+            MouseGestureRecognizer.defaultActivationDistance == 7
+                && MouseGestureRecognizer.defaultDominanceRatio == 1.2,
+            "横向切桌面阈值不变：7px，且是纵向的 1.2 倍"
+        )
+        expect(
+            MouseGestureRecognizer.defaultVerticalActivationDistance == 14
+                && MouseGestureRecognizer.defaultVerticalDominanceRatio == 2,
+            "纵向需 14px 且至少是横向 2 倍（Logi angle snapping 的 2:1）"
+        )
+
+        // The exact motion samples logged for that hold.
+        let wobble: [(Double, Double)] = [(-2, 1), (0, 3), (1, 2), (5, 3)]
+        var recorded = MouseGestureRecognizer()
+        let wobbleUpdates = wobble.compactMap { recorded.append(deltaX: $0.0, deltaY: $0.1) }
+        expect(wobbleUpdates.isEmpty, "现场记录的按键抖动（9px 下、4px 横）不再锁定成「下」")
+        expect(recorded.completion == .click, "只有按键抖动就松开时回落为单击，而不是打开应用程序窗口")
+        let swipe = recorded.append(deltaX: 14, deltaY: 2)
+        expect(
+            swipe == .began(axis: .horizontal, pixelDelta: 18),
+            "抖动之后的真实右划锁定横轴，并计入死区内的横向位移"
+        )
+        expect(
+            MouseGestureAxis.horizontal.direction(forPixelDelta: 18).action == .spaceLeft,
+            "这次按住最终切到左边的桌面，与用户的右划一致"
+        )
+
+        var up = MouseGestureRecognizer()
+        expect(
+            up.append(deltaX: 0, deltaY: -10) == nil,
+            "纵向 10px 旧规则已锁定，现在仍算按键抖动区"
+        )
+        expect(
+            up.append(deltaX: 0, deltaY: -4) == .began(axis: .vertical, pixelDelta: -14),
+            "刻意上划累计到 14px 即锁定纵轴，调度中心仍然可达"
+        )
+        var down = MouseGestureRecognizer()
+        expect(
+            down.append(deltaX: 1, deltaY: 20) == .began(axis: .vertical, pixelDelta: 20),
+            "刻意下划一次越过 14px 即锁定，应用程序窗口仍然可达"
+        )
+
+        var slanted = MouseGestureRecognizer()
+        _ = slanted.append(deltaX: 8, deltaY: 14)
+        _ = slanted.append(deltaX: 4, deltaY: 7)
+        expect(
+            slanted.axis == nil && slanted.completion == .click,
+            "偏离竖直约 30° 的移动不够 2:1，不会被猜成模态的纵向手势"
+        )
+
+        var shallow = MouseGestureRecognizer()
+        expect(
+            shallow.append(deltaX: 7, deltaY: 5) == .began(axis: .horizontal, pixelDelta: 7),
+            "横向仍按 7px、1.2 倍锁定，桌面切换的灵敏度不受影响"
+        )
     }
 
     private static func mapsDirectionsLikeLogiOptions() {
@@ -2944,6 +3009,74 @@ enum SelfCheck {
             "左右桌面手势使用系统方向键键码"
         )
         expect(events.allSatisfy(SyntheticEventTag.isMarked), "Logi 风格手势事件全部带防回环标记")
+    }
+
+    /// 2026-10-20, macOS 27.0.1: Logi Options+ posts the same three edges with key-up a median
+    /// 14 ms after key-down (`usleep(10000)` in its agent). The hold must stay off the main run loop
+    /// that serves the event taps, and strokes must not interleave.
+    private static func gestureSpaceStrokeHoldsKeyLikeLogi() {
+        expect(
+            ActionRunner.gestureSpaceKeyHold == 0.010
+                && ActionRunner.gestureSpaceEventDelays == [0, 0.010, 0],
+            "桌面切换按键：按下立即发，按住 10ms 再抬起，随后立刻清修饰键（与 Logi 一致）"
+        )
+
+        let flags: CGEventFlags = [.maskControl, .maskSecondaryFn]
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let first = ActionRunner.gestureSpaceEvents(keyCode: 123, flags: flags, source: source),
+              let second = ActionRunner.gestureSpaceEvents(keyCode: 124, flags: flags, source: source)
+        else {
+            expect(false, "可构造两次桌面切换按键序列")
+            return
+        }
+        expect(
+            first.count == ActionRunner.gestureSpaceEventDelays.count,
+            "延迟表覆盖序列里的每一个事件"
+        )
+
+        struct Posted {
+            var type: CGEventType
+            var keyCode: Int64
+            var onMainThread: Bool
+            var uptime: TimeInterval
+        }
+        let posted = Locked<[Posted]>([])
+        let queue = DispatchQueue(label: "com.openmouse.OpenMouse.selfcheck.gesture-space")
+        // Suspended, so anything posted before `resume()` could only have been posted inline.
+        queue.suspend()
+        for events in [first, second] {
+            ActionRunner.deliverGestureSpaceEvents(events, on: queue) { event in
+                let entry = Posted(
+                    type: event.type,
+                    keyCode: event.getIntegerValueField(.keyboardEventKeycode),
+                    onMainThread: Thread.isMainThread,
+                    uptime: monotonicSeconds()
+                )
+                posted.withValue { $0.append(entry) }
+            }
+        }
+        expect(posted.value.isEmpty, "投递调用只入队，不在调用方线程（主线程）上发事件或等待")
+        queue.resume()
+        queue.sync {}
+
+        let events = posted.value
+        expect(
+            events.map(\.type) == [.keyDown, .keyUp, .flagsChanged, .keyDown, .keyUp, .flagsChanged]
+                && events.prefix(2).allSatisfy { $0.keyCode == 123 }
+                && events.dropFirst(3).prefix(2).allSatisfy { $0.keyCode == 124 },
+            "连续两次切换各自完整发完，第二次的按下不会插进第一次的按下与抬起之间"
+        )
+        expect(events.allSatisfy { !$0.onMainThread }, "按住的 10ms 发生在后台串行队列，不占事件 tap 所在的主线程")
+        if events.count == 6 {
+            // Lower bound only: an upper bound would depend on machine load.
+            expect(
+                events[1].uptime - events[0].uptime >= 0.009
+                    && events[4].uptime - events[3].uptime >= 0.009,
+                "抬起确实在按下之后至少约 10ms 才发出"
+            )
+        } else {
+            expect(false, "两次切换共发出 6 个事件")
+        }
     }
 
     private static func rejectsInvalidSystemHotkeyNumbers() {
