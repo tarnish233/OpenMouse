@@ -128,6 +128,7 @@ enum Strings {
         case 3: return "侧键 4"
         case 4: return "侧键 5"
         case LogitechHIDPPProtocol.dpiSwitchButton: return "DPI 键"
+        case LogitechHIDPPProtocol.m720ThumbButton: return "拇指键"
         default: return "按键 \(number + 1)"
         }
     }

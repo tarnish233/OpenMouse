@@ -145,11 +145,31 @@ enum SelfCheck {
             hidppAcceptsOnlySupportedMouseInterfaces()
             hidppEncodesDivertWithoutRemapping()
             hidppIncludesDpiSwitchDuringCapture()
+            hidppRecognizesM720ThumbButton()
+            hidppCapturesM720ThumbWithoutDPI()
+            hidppDecodesM720ThumbSeparately()
+            hidppM720ThumbRoutesShortcut()
+            hidppM720ThumbRoutesGesture()
+            hidppM720ThumbCaptureReleasesWithoutHardwareUp()
             hidppEncodesDPIAndChoosesOtherLevel()
             hidppDPIRefreshCacheExpiresWithoutLosingState()
             hidppAsyncReportOwnsBytesUntilCompletion()
             hidppDecodesPhysicalHoldSet()
             hidppHoldOutlivesMomentaryNativeMouseUp()
+        }
+        group("Unifying 接收器") {
+            unifyingFiltersVendorInterfaces()
+            unifyingDecodesPairingSlots()
+            unifyingDecodesLinkNotifications()
+            unifyingPreservesNotificationFlags()
+            unifyingTransactionsRejectStaleReplies()
+            unifyingTransactionsAreBounded()
+            unifyingAuthorizesBeforeWriting()
+            unifyingBorrowedSessionUsesItsSlot()
+            unifyingOfflineCancelsOnlyItsClaim()
+            unifyingButtonOwnersKeepOtherHolds()
+            unifyingTransportRestoresOffMain()
+            unifyingReceiverRoutesOnlyM720AndReconnects()
         }
         group("手势导航") {
             commitsDominantAxis()
@@ -1107,8 +1127,8 @@ enum SelfCheck {
         )
         expect(
             LogitechHIDPPProtocol.desiredButtons(configured: [4], capturing: true)
-                == [4, LogitechHIDPPProtocol.dpiSwitchButton],
-            "录入期间临时接管不产生原生 CGEvent 的 DPI 键"
+                == [4, LogitechHIDPPProtocol.dpiSwitchButton, LogitechHIDPPProtocol.m720ThumbButton],
+            "录入期间临时接管不产生原生 CGEvent 的 DPI 键与拇指键"
         )
         expect(
             LogitechHIDPPProtocol.desiredButtons(configured: [4], capturing: false) == [4],
@@ -1127,6 +1147,604 @@ enum SelfCheck {
             Strings.buttonName(LogitechHIDPPProtocol.dpiSwitchButton) == "DPI 键",
             "DPI Switch 在界面中使用明确名称而不是通用编号"
         )
+    }
+
+    private static func hidppRecognizesM720ThumbButton() {
+        expect(
+            LogitechHIDPPProtocol.m720ThumbButton == 6
+                && LogitechHIDPPProtocol.cidToButton[0x00D0] == 6,
+            "M720 的物理拇指 CID 0x00D0 使用独立且可持久化的按键编号 6"
+        )
+        expect(
+            LogitechHIDPPProtocol.cidToButton[0x0056] == 4
+                && LogitechHIDPPProtocol.cidToButton[0x00D7] == 4
+                && LogitechHIDPPProtocol.cidToButton[0x00FD] == 5,
+            "M720 拇指键不复用 Forward、虚拟手势或现有 DPI 键编号"
+        )
+        expect(Strings.buttonName(6) == "拇指键", "M720 拇指键在录入和映射行中有明确名称")
+        expect(
+            LogitechHIDPPProtocol.reportingParameters(cid: 0x00D0, divert: true)
+                == [0x00, 0xD0, 0x03, 0x00, 0x00],
+            "接管 M720 拇指键只改报告模式，不覆盖其原厂 target CID"
+        )
+        expect(
+            LogitechHIDPPProtocol.reportingParameters(cid: 0x00D0, divert: false)
+                == [0x00, 0xD0, 0x02, 0x00, 0x00],
+            "解除 M720 拇指键接管使用 valid 位并清除 divert 值"
+        )
+    }
+
+    private static func hidppCapturesM720ThumbWithoutDPI() {
+        // M720's actual control inventory includes a physical 0x00D0 and a distinct virtual
+        // 0x00D7, but no DPI Switch. Capture must select the former without assuming a DPI sensor.
+        let controls: [LogitechHIDPPProtocol.Control] = [
+            .init(cid: 0x0050, divertable: false),
+            .init(cid: 0x0051, divertable: false),
+            .init(cid: 0x0052, divertable: true),
+            .init(cid: 0x0053, divertable: true),
+            .init(cid: 0x0056, divertable: true),
+            .init(cid: 0x005B, divertable: true),
+            .init(cid: 0x005D, divertable: true),
+            .init(cid: 0x00D0, divertable: true),
+            .init(cid: 0x00D7, divertable: true)
+        ]
+        let capture = LogitechHIDPPProtocol.desiredButtons(configured: [], capturing: true)
+        expect(capture == [5, 6], "没有任何绑定时录入仍主动请求 DPI 键和 M720 拇指键")
+        expect(
+            LogitechHIDPPProtocol.desiredCIDs(controls: controls, buttons: capture) == [0x00D0],
+            "M720 首次录入只接管真实拇指键，不要求 DPI 功能也不抢其他侧键"
+        )
+        expect(
+            LogitechHIDPPProtocol.desiredCIDs(controls: controls, buttons: [6]) == [0x00D0],
+            "配置拇指键不会连带接管 Forward 或虚拟手势控件"
+        )
+        let idle = LogitechHIDPPProtocol.desiredButtons(configured: [], capturing: false)
+        expect(
+            LogitechHIDPPProtocol.desiredCIDs(controls: controls, buttons: idle).isEmpty,
+            "关闭录入且未设置动作时不继续接管 M720 拇指键"
+        )
+        expect(
+            LogitechHIDPPProtocol.desiredButtons(configured: [6], capturing: false) == [6],
+            "录入结束后保留已生效的拇指键绑定，不保留临时 DPI 请求"
+        )
+        expect(
+            LogitechHIDPPProtocol.desiredCIDs(
+                controls: [.init(cid: 0x00D0, divertable: false)], buttons: capture
+            ).isEmpty,
+            "设备未声明可接管的拇指控件不会被试探性改写"
+        )
+        expect(
+            LogitechHIDPPProtocol.desiredCIDs(
+                controls: [.init(cid: 0xFFFF, divertable: true)], buttons: capture
+            ).isEmpty,
+            "录入不会接管未知 CID"
+        )
+    }
+
+    private static func hidppDecodesM720ThumbSeparately() {
+        let held: [UInt8] = [
+            0x11, 0xFF, 0x0B, 0x00,
+            0x00, 0xD0, 0x00, 0x56, 0x00, 0xD7, 0x00, 0xFD, 0x00, 0x00
+        ]
+        let buttons = LogitechHIDPPProtocol.activeButtons(
+            in: held, ownedCIDs: [0x00D0, 0x0056, 0x00D7, 0x00FD]
+        )
+        expect(buttons == [4, 5, 6], "拇指、Forward 与 DPI 同时按住时是三个独立逻辑键")
+        expect(
+            LogitechHIDPPProtocol.activeButtons(in: held, ownedCIDs: [0x0056]) == [4],
+            "未接管的拇指报告不进入按键管线"
+        )
+        var state = LogitechHIDPPProtocol.ButtonState()
+        let down = state.update(buttons)
+        expect(down.pressed == [4, 5, 6] && down.released.isEmpty, "物理按住集合为每个独立键产生一次 down")
+        let duplicate = state.update(buttons)
+        expect(duplicate.pressed.isEmpty && duplicate.released.isEmpty, "重复 HID++ 状态不会重复执行快捷键")
+        let keep = state.update(state.held.intersection([6]))
+        expect(
+            keep.pressed.isEmpty && keep.released == [4, 5] && state.held == [6],
+            "解除其他键接管不会中断仍被接管的拇指按住会话"
+        )
+        let release = state.update([])
+        expect(release.released == [6] && state.held.isEmpty, "空物理状态明确释放拇指键")
+    }
+
+    private static func hidppM720ThumbRoutesShortcut() {
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var actions: [MouseAction] = []
+        let router = EventRouter(config: snapshot, runAction: { actions.append($0) })
+        let shortcut = MouseAction.keyStroke(KeyCombo(
+            keyCode: UInt16(kVK_Tab), modifiers: CGEventFlags.maskCommand.rawValue
+        ))
+        let bindings = [
+            ButtonBinding(button: 4, action: .navigateForward),
+            ButtonBinding(button: 6, action: shortcut)
+        ]
+        router.updateBindings(bindings)
+        router.updateHIDPPOwnedButtons([6])
+        let held: [UInt8] = [0x11, 0xFF, 0x0B, 0x00, 0x00, 0xD0, 0x00, 0x00]
+        for button in LogitechHIDPPProtocol.activeButtons(in: held, ownedCIDs: [0x00D0]) {
+            router.handleHIDPPButton(button: button, isDown: true)
+            router.handleHIDPPButton(button: button, isDown: true)
+        }
+        expect(actions == [shortcut], "M720 拇指报告进入实际路由器并只执行一次自定义快捷键")
+
+        guard let forwardDown = mouseButtonEvent(
+            type: .otherMouseDown, button: 4, modifiers: 0, location: .zero
+        ), let forwardUp = mouseButtonEvent(
+            type: .otherMouseUp, button: 4, modifiers: 0, location: .zero
+        ) else {
+            expect(false, "可构造 M720 的独立 Forward 按下与抬起")
+            return
+        }
+        _ = router.handleButton(type: .otherMouseDown, event: forwardDown)
+        _ = router.handleButton(type: .otherMouseUp, event: forwardUp)
+        expect(
+            actions == [shortcut, .navigateForward] && router.activeButtonClaimCount == 1,
+            "接管拇指时 Forward 仍执行自己的绑定，Forward 抬起不释放拇指 claim"
+        )
+        snapshot.value = .inactive
+        router.updateBindings([])
+        router.handleHIDPPButton(button: 6, isDown: false)
+        expect(
+            router.activeButtonClaimCount == 0 && actions == [shortcut, .navigateForward],
+            "配置变化后的拇指抬起仍按原 claim 收尾，不执行第二次快捷键"
+        )
+
+        var preferences = Preferences()
+        preferences.buttons = bindings
+        preferences.normalize()
+        let data = try? JSONEncoder().encode(preferences)
+        let decoded = data.flatMap { try? JSONDecoder().decode(Preferences.self, from: $0) }
+        expect(
+            decoded?.buttons == preferences.buttons,
+            "M720 拇指快捷键与原有 Forward 绑定可同时持久化，无需迁移旧编号"
+        )
+    }
+
+    private static func hidppM720ThumbRoutesGesture() {
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var gestures: [MouseAction] = []
+        var clicks: [MouseAction] = []
+        var activity: [Bool] = []
+        let router = EventRouter(
+            config: snapshot, runGestureAction: { gestures.append($0) }, runAction: { clicks.append($0) }
+        )
+        router.onGestureActivityChanged = { activity.append($0) }
+        router.updateBindings([ButtonBinding(button: 6, action: .gestureNavigation)])
+        router.updateHIDPPOwnedButtons([6])
+        router.handleHIDPPButton(button: 6, isDown: true)
+        expect(router.activeGestureSessionCount == 1 && activity == [true], "M720 拇指按住启动现有手势和 motion tap 链路")
+        guard let motion = mouseMotionEvent(location: .zero, deltaX: 12, deltaY: 0) else {
+            expect(false, "可构造 M720 拇指手势位移")
+            return
+        }
+        _ = router.handleMotion(motion)
+        _ = router.handleMotion(motion)
+        expect(gestures == [.spaceLeft], "M720 拇指同一次按住中的后续移动不重复切换桌面")
+        router.handleHIDPPButton(button: 6, isDown: false)
+        expect(
+            router.activeButtonClaimCount == 0 && router.activeGestureSessionCount == 0
+                && activity == [true, false] && clicks.isEmpty,
+            "拇指手势抬起成对关闭会话和 motion tap，不额外执行单击动作"
+        )
+        router.handleHIDPPButton(button: 6, isDown: true)
+        router.handleHIDPPButton(button: 6, isDown: false)
+        expect(clicks == [.missionControl], "M720 拇指手势绑定保留原地单击调度中心的行为")
+    }
+
+    /// The recorder may close before physical up. Restoring native reporting can remove that
+    /// up from HID++, so ownership changes must flush the claim and allow the next capture.
+    private static func hidppM720ThumbCaptureReleasesWithoutHardwareUp() {
+        let snapshot = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var actions: [MouseAction] = []
+        var captured: [MouseEngine.CapturedPress] = []
+        let router = EventRouter(config: snapshot, runAction: { actions.append($0) })
+        router.updateBindings([ButtonBinding(button: 6, action: .copy)])
+        var state = LogitechHIDPPProtocol.ButtonState()
+        let held: [UInt8] = [0x11, 0xFF, 0x0B, 0x00, 0x00, 0xD0, 0x00, 0x00]
+        let expectedModifiers = CGEventSource.flagsState(.combinedSessionState).rawValue & EventRouter.modifierMask
+        func publish(_ buttons: Set<Int>) {
+            let changes = state.update(buttons)
+            for button in changes.pressed.sorted() { router.handleHIDPPButton(button: button, isDown: true) }
+            for button in changes.released.sorted() { router.handleHIDPPButton(button: button, isDown: false) }
+        }
+        func record() {
+            router.setCaptureHandler { button, modifiers in
+                captured.append(MouseEngine.CapturedPress(button: button, modifiers: modifiers))
+            }
+        }
+        func drainCaptureQueue() {
+            var drained = false
+            DispatchQueue.main.async {
+                drained = true
+                CFRunLoopStop(CFRunLoopGetMain())
+            }
+            CFRunLoopRunInMode(.defaultMode, 1, false)
+            expect(drained, "拇指录入主队列回调在有限时间内完成")
+        }
+
+        record()
+        publish(LogitechHIDPPProtocol.activeButtons(in: held, ownedCIDs: [0x00D0]))
+        expect(
+            captured.isEmpty && actions.isEmpty && router.activeButtonClaimCount == 1,
+            "拇指录入优先于已有动作，按下先建立 claim 并异步通知界面"
+        )
+        drainCaptureQueue()
+        expect(
+            captured == [MouseEngine.CapturedPress(button: 6, modifiers: expectedModifiers)],
+            "首次 HID++ 拇指按下实际送达录入回调，并保留当前修饰键"
+        )
+        router.setCaptureHandler(nil)
+        publish(state.held.intersection([]))
+        expect(
+            state.held.isEmpty && router.activeButtonClaimCount == 0 && actions.isEmpty,
+            "录入关闭后不等待可能永远不来的硬件 up，立即释放 capture claim"
+        )
+        publish(LogitechHIDPPProtocol.activeButtons(in: held, ownedCIDs: []))
+        expect(state.held.isEmpty && actions.isEmpty, "解除接管后的迟到拇指报告不会触发原绑定")
+        record()
+        publish(LogitechHIDPPProtocol.activeButtons(in: held, ownedCIDs: [0x00D0]))
+        drainCaptureQueue()
+        expect(captured.map(\.button) == [6, 6], "再次录入的第一个拇指按下不会被上次缓存的 held 状态吞掉")
+        router.setCaptureHandler(nil)
+        publish([])
+        expect(router.activeButtonClaimCount == 0 && actions.isEmpty, "录入结束后的抬起不执行之前的普通动作")
+    }
+
+    private static func unifyingLongReport(_ prefix: [UInt8]) -> [UInt8] {
+        precondition(prefix.count <= 20)
+        return prefix + [UInt8](repeating: 0, count: 20 - prefix.count)
+    }
+
+    private static func unifyingFiltersVendorInterfaces() {
+        let vendor: Set<LogitechUnifyingProtocol.Usage> = [.init(page: 0xFF00, usage: 1), .init(page: 0xFF00, usage: 2)]
+        func accepts(pid: Int = 0xC52B, vid: Int = 0x046D, transport: String = "USB",
+                     usages: Set<LogitechUnifyingProtocol.Usage>? = nil) -> Bool {
+            LogitechUnifyingProtocol.acceptsInterface(vendorID: vid, productID: pid,
+                                                      transport: transport, usages: usages ?? vendor)
+        }
+        expect(accepts(), "C52B 的专用短／长 HID++ 接口可进入 Unifying 发现")
+        expect(accepts(pid: 0xC532), "C532 同属标准 Unifying 接收器")
+        expect(!accepts(vid: 0x05AC), "相同 usage 的其他厂商接口不被打开")
+        expect(!accepts(transport: "Bluetooth"), "Unifying 发现不会抢蓝牙直连接口")
+        expect([0xC548, 0xC52F, 0xC539, 0xFFFF].allSatisfy { !accepts(pid: $0) },
+               "Bolt、Nano、Lightspeed 和未知接收器不被误当成 Unifying")
+        expect(!accepts(usages: [.init(page: 1, usage: 6)]), "普通接收器键盘接口不被打开")
+        expect(!accepts(usages: [.init(page: 1, usage: 2)]), "普通接收器鼠标接口不被当成 HID++ 通道")
+        expect(!accepts(usages: [.init(page: 0xFF00, usage: 1)])
+               && !accepts(usages: [.init(page: 0xFF00, usage: 2)]), "缺失短或长 vendor 集合时拒绝不完整接口")
+        expect(!accepts(usages: vendor.union([.init(page: 1, usage: 6)])), "混有真实键盘 usage 的接口不能被接管")
+        let parsed = LogitechUnifyingProtocol.usages(from: [
+            ["DeviceUsagePage": 0xFF00, "DeviceUsage": 1],
+            ["DeviceUsagePage": 0xFF00, "DeviceUsage": 2],
+            ["DeviceUsagePage": 1]
+        ])
+        expect(parsed == vendor && LogitechUnifyingProtocol.usages(from: nil).isEmpty,
+               "usage-pair 属性逐行容错，缺失属性不被猜成可用通道")
+        expect((LogitechUnifyingDiscovery.matchingCriteria[kIOPropertyMatchKey] as? [String: Int])?[kIOHIDVendorIDKey] == 0x046D,
+               "IORegistry 初步匹配先限制罗技 VID，再检查 PID 与 usage")
+    }
+
+    private static func unifyingDecodesPairingSlots() {
+        for slot: UInt8 in 1...6 {
+            expect(LogitechUnifyingProtocol.pairingRequest(slot: slot)
+                   == [0x10, 0xFF, 0x83, 0xB5, 0x20 + slot - 1, 0, 0],
+                   "槽位 \(slot) 通过接收器只读配对寄存器发现，不向未知外设发探测")
+        }
+        expect(LogitechUnifyingProtocol.pairingRequest(slot: 0) == nil
+               && LogitechUnifyingProtocol.pairingRequest(slot: 7) == nil, "槽位范围严格限定为 1–6")
+        let sixth = unifyingLongReport([0x11, 0xFF, 0x83, 0xB5, 0x25, 0, 8, 0x40, 0x5E, 0, 0, 2])
+        expect(LogitechUnifyingProtocol.pairedDevice(in: sixth)
+               == .init(slot: 6, wirelessProductID: 0x405E, kind: 2), "配对响应的大端 WPID 与 r7 设备类型正确解码")
+        var keyboard = sixth
+        keyboard[11] = 1
+        expect(LogitechUnifyingProtocol.pairedDevice(in: keyboard)?.isM720 == false,
+               "即使 WPID 恰好等于 405E，键盘类型也不能被当作 M720")
+        var reversed = sixth
+        reversed[7] = 0x5E
+        reversed[8] = 0x40
+        expect(LogitechUnifyingProtocol.pairedDevice(in: reversed)?.isM720 == false, "配对 WPID 不使用连接通知的小端顺序")
+        expect(LogitechUnifyingProtocol.pairedDevice(in: Array(sixth.prefix(11))) == nil,
+               "截断配对报告被拒绝而不是越界读取设备类型")
+        var unrelated = sixth
+        unrelated[3] = 0xB4
+        expect(LogitechUnifyingProtocol.pairedDevice(in: unrelated) == nil, "其他接收器寄存器回复不能伪装成槽位身份")
+    }
+
+    private static func unifyingDecodesLinkNotifications() {
+        let mouse = LogitechUnifyingProtocol.PairedDevice(slot: 3, wirelessProductID: 0x405E, kind: 2)
+        expect(LogitechUnifyingProtocol.linkNotification(in: [0x10, 3, 0x41, 4, 2, 0x5E, 0x40])
+               == .connected(mouse, online: true), "连接通知用小端 WPID 确认槽位 3 的 M720")
+        expect(LogitechUnifyingProtocol.linkNotification(in: [0x10, 3, 0x41, 4, 0x42, 0x5E, 0x40])
+               == .connected(mouse, online: false), "连接通知的 out-of-range 位明确表示离线")
+        expect(LogitechUnifyingProtocol.linkNotification(in: [0x10, 3, 0x40, 2, 0, 0, 0]) == .disconnected(3),
+               "0x40 拔除／断连通知保留实际槽位")
+        expect(LogitechUnifyingProtocol.linkNotification(in: [0x10, 0xFF, 0x41, 4, 2, 0x5E, 0x40]) == nil,
+               "接收器自身 0xFF 不是可接管的鼠标槽位")
+        expect(LogitechUnifyingProtocol.linkNotification(in: [0x10, 3, 0x41, 0x10, 2, 0x5E, 0x40]) == nil,
+               "其他无线协议的通知不套用 Unifying 布局")
+        expect(LogitechUnifyingProtocol.linkNotification(in: [0x10, 3, 0x41]) == nil,
+               "截断连接通知不进入重连状态机")
+    }
+
+    private static func unifyingPreservesNotificationFlags() {
+        expect(LogitechUnifyingProtocol.readNotifications == [0x10, 0xFF, 0x81, 0, 0, 0, 0],
+               "通知 flags 从接收器自身读取")
+        expect(LogitechUnifyingProtocol.enableWirelessNotifications(preserving: [0xAA, 0xF0, 0xCC])
+               == [0x10, 0xFF, 0x80, 0, 0xAA, 0xF1, 0xCC], "打开无线通知只设置 r1 bit0，保留所有其他 flags")
+        expect(LogitechUnifyingProtocol.enableWirelessNotifications(preserving: [0xAA, 0xF1, 0xCC])
+               == [0x10, 0xFF, 0x80, 0, 0xAA, 0xF1, 0xCC], "已有无线通知位不被清除或重复改写")
+        expect(LogitechUnifyingProtocol.enableWirelessNotifications(preserving: []) == nil, "缺失 flags 时不凭空覆盖寄存器")
+        expect(LogitechUnifyingProtocol.requestConnections == [0x10, 0xFF, 0x80, 2, 2, 0, 0],
+               "请求现有连接信息，不打开配对锁或取消配对")
+        expect(LogitechUnifyingProtocol.shutdownTimeout < LogitechUnifyingProtocol.exitFlushTimeout
+               && LogitechUnifyingProtocol.exitFlushTimeout < 12, "私有恢复期限先于进程 flush 期限，且不耗尽宿主 12 秒退出兜底")
+    }
+
+    private static func unifyingTransactionsRejectStaleReplies() {
+        let packet = LogitechUnifyingProtocol.rootControlsRequest(slot: 3)!
+        var queue = LogitechHIDPPTransactionQueue()
+        let firstID = queue.enqueue(packet)
+        let first = queue.beginNext()!
+        expect(first.id == firstID && queue.beginNext() == nil, "同一接收器一次只发一个在途命令")
+        let oldReply = unifyingLongReport([0x11, 3, 0, first.wire[3], 0x0B])
+        var wrongSlot = oldReply
+        wrongSlot[1] = 1
+        expect(queue.complete(with: wrongSlot) == nil, "键盘或其他槽位的相同 feature 回复不能完成鼠标请求")
+        var notification = oldReply
+        notification[3] = 0
+        expect(queue.complete(with: notification) == nil, "software ID 0 的自发通知不是请求回复")
+        expect(queue.failActive()?.id == firstID, "请求超时只移除对应在途命令")
+        _ = queue.enqueue(packet)
+        let second = queue.beginNext()!
+        expect(second.wire[3] != first.wire[3] && queue.complete(with: oldReply) == nil,
+               "相同槽位的新请求使用不同软件 ID，旧超时回复不能偷走新请求")
+        let error = unifyingLongReport([0x11, 3, 0xFF, second.wire[2], second.wire[3], 2])
+        let completed = queue.complete(with: error)
+        expect(completed?.reply[4] == packet[3] && LogitechUnifyingProtocol.errorCode(in: error) == 2 && queue.isEmpty,
+               "HID++ 2.0 错误按请求匹配，恢复逻辑软件 ID 并从正确字节读取错误码")
+        let pairing = LogitechUnifyingProtocol.pairingRequest(slot: 6)!
+        _ = queue.enqueue(pairing)
+        _ = queue.beginNext()
+        let legacyError: [UInt8] = [0x10, 0xFF, 0x8F, 0x83, 0xB5, 8, 0]
+        expect(queue.complete(with: legacyError) != nil && LogitechUnifyingProtocol.errorCode(in: legacyError) == 8,
+               "HID++ 1.0 空槽位错误立即结束接收器请求，不拖死后续扫描")
+        expect(LogitechUnifyingProtocol.errorCode(in: unifyingLongReport([0x11, 3, 0x8F, 1])) == nil,
+               "长报告的 feature 0x8F 不被误判为短格式 HID++ 1.0 错误")
+    }
+
+    private static func unifyingTransactionsAreBounded() {
+        var queue = LogitechHIDPPTransactionQueue()
+        let packet = LogitechUnifyingProtocol.rootControlsRequest(slot: 3)!
+        expect((0..<LogitechHIDPPTransactionQueue.capacity).allSatisfy { _ in queue.enqueue(packet) != nil }
+               && queue.enqueue(packet) == nil, "共享接收器待发送队列有容量上限")
+        _ = queue.beginNext()
+        expect(queue.cancel(slot: 3, includingActive: false).count == LogitechHIDPPTransactionQueue.capacity - 1
+               && queue.active != nil, "断连丢弃排队命令，但不抢占仍在无线处理中途的命令")
+        _ = queue.failActive()
+        expect(queue.isEmpty, "在途超时后队列完整排空")
+        let pairing = LogitechUnifyingProtocol.pairingRequest(slot: 6)!
+        _ = queue.enqueue(pairing)
+        _ = queue.beginNext()
+        let wrong = unifyingLongReport([0x11, 0xFF, 0x83, 0xB5, 0x20, 0, 8, 0x40, 0x5E, 0, 0, 2])
+        expect(queue.complete(with: wrong) == nil, "另一配对子寄存器的回复不能改变当前扫描槽位")
+        _ = queue.cancel()
+        expect(queue.enqueue([]) == nil && queue.enqueue([0x11, 3]) == nil, "非法报告不占用发送队列")
+    }
+
+    private static func unifyingAuthorizesBeforeWriting() {
+        var slots = LogitechUnifyingSlotState()
+        expect(!slots.accepts(slot: 1) && !slots.accepts(slot: 3), "尚无身份信息时所有外设槽位默认拒绝")
+        let mouse = LogitechUnifyingProtocol.PairedDevice(slot: 3, wirelessProductID: 0x405E, kind: 2)
+        slots.observe(mouse)
+        expect(slots.accepts(slot: 3) && !slots.accepts(slot: 1), "只授权身份明确的 M720 槽位")
+        slots.observe(.init(slot: 7, wirelessProductID: 0x405E, kind: 2))
+        expect(!slots.accepts(slot: 7), "构造出的越界槽位也不能获得发送权限")
+        var divert = LogitechUnifyingProtocol.restoreThumbRequest(slot: 3, feature: 0x0B)!
+        divert[6] = 3
+        let old = UUID()
+        slots.submitted(divert, id: old)
+        expect(slots.lease(slot: 3) == old && slots.restorationSlots == [3], "发出接管后即保留恢复义务，不依赖可能丢失的 ACK")
+        let new = UUID()
+        slots.submitted(divert, id: new)
+        expect(slots.lease(slot: 3) == new && slots.lease(slot: 3) != old, "新接管换世代，旧恢复计划失效")
+        let restore = LogitechUnifyingProtocol.restoreThumbRequest(slot: 3, feature: 0x17)!
+        slots.completed(restore, reply: unifyingLongReport([0x11, 3, 0xFF, 0x17, 0x31, 2]))
+        expect(slots.lease(slot: 3) == new, "恢复失败不能清掉尚未完成的恢复义务")
+        slots.completed(restore, reply: unifyingLongReport([0x11, 3, 0x17, 0x31]))
+        expect(slots.restorationSlots.isEmpty, "只有成功恢复回复才清除租约")
+        slots.submitted(divert, id: UUID())
+        slots.observe(.connected(.init(slot: 3, wirelessProductID: 0x405E, kind: 1), online: true))
+        expect(!slots.accepts(slot: 3) && slots.restorationSlots.isEmpty, "原鼠标槽位变成键盘时取消授权和旧恢复，不给键盘写 CID")
+        expect(LogitechUnifyingProtocol.restoreThumbRequest(slot: 3, feature: 0) == nil
+               && LogitechUnifyingProtocol.restoreThumbRequest(slot: 3, feature: 0xFF) == nil,
+               "未解析到有效 feature index 时不投递恢复写入")
+    }
+
+    private static func unifyingBorrowedSessionUsesItsSlot() {
+        MainActor.assumeIsolated {
+            var sent: [[UInt8]] = []
+            var buttons: [(Int, Bool)] = []
+            var cancelled: [Int] = []
+            let session = LogitechHIDPPDeviceSession(
+                name: "self-check M720 receiver", productID: 0x405E, deviceIndex: 3,
+                allowedButtons: [6], supportsDPI: false, sendReport: { sent.append($0); return true },
+                onButton: { buttons.append(($0, $1)) }, onCancelButton: { cancelled.append($0) },
+                onOwnershipChanged: {}, onDPIChanged: { _ in }
+            )
+            session.updateDesiredButtons([4, 5, 6])
+            session.start()
+            expect(sent == [LogitechUnifyingProtocol.rootControlsRequest(slot: 3)!], "实际鼠标会话把 Root 请求发给槽位 3，不再硬编码 0xFF")
+            session.receive(unifyingLongReport([0x11, 1, 0, 1, 0x0B]))
+            expect(sent.count == 1, "其他槽位的 Root 回复不能推动鼠标会话")
+            session.receive(unifyingLongReport([0x11, 3, 0, 1, 0x0B]))
+            session.receive(unifyingLongReport([0x11, 3, 0x0B, 1, 2]))
+            session.receive(unifyingLongReport([0x11, 3, 0x0B, 0x11, 0, 0xD0, 0, 0xAD, 0x71, 0, 0, 0, 1]))
+            session.receive(unifyingLongReport([0x11, 3, 0x0B, 0x11, 0, 0x56, 0, 0x3E, 0x71, 0, 0, 0, 1]))
+            expect(session.ownedButtons == [6] && sent.count == 5 && sent.last?[1] == 3 && sent.last?[5] == 0xD0,
+                   "接收器路径只接管 M720 拇指，不接管 Forward、DPI 或探测 DPI 功能")
+            session.receive(unifyingLongReport([0x11, 1, 0x0B, 0, 0, 0xD0]))
+            expect(buttons.isEmpty, "键盘槽位的同编号控制报告不进入实际鼠标按键回调")
+            let down = unifyingLongReport([0x11, 3, 0x0B, 0, 0, 0xD0])
+            session.receive(down)
+            session.receive(down)
+            expect(buttons.map { $0.0 } == [6] && buttons.map { $0.1 } == [true], "匹配槽位的物理报告只产生一次独立拇指 down")
+            session.updateDesiredButtons([])
+            expect(session.ownedButtons.isEmpty && buttons.map { $0.1 } == [true, false] && sent.last?[6] == 2,
+                   "取消配置后用同一槽位恢复原厂报告，并收尾可能丢失的 up")
+            session.updateDesiredButtons([6])
+            session.receive(down)
+            session.stop(restoreControls: false, cancelHeld: true)
+            expect(cancelled == [6] && buttons.count == 3, "借用会话断连以取消结束，不伪造物理点击 up")
+        }
+    }
+
+    private static func unifyingOfflineCancelsOnlyItsClaim() {
+        let config = Locked(ResolvedConfig(active: true, scroll: .default, buttonsActive: true))
+        var clicks: [MouseAction] = []
+        var activity: [Bool] = []
+        let router = EventRouter(config: config, runAction: { clicks.append($0) })
+        router.onGestureActivityChanged = { activity.append($0) }
+        router.updateBindings([ButtonBinding(button: 6, action: .gestureNavigation), ButtonBinding(button: 4, action: .gestureNavigation)])
+        router.handleHIDPPButton(button: 6, isDown: true)
+        router.handleHIDPPButton(button: 4, isDown: true)
+        router.cancelHIDPPButton(button: 6)
+        expect(router.activeButtonClaimCount == 1 && router.activeGestureSessionCount == 1 && activity == [true],
+               "接收器拇指断连只取消自己的 claim，其他按住手势不受影响")
+        router.cancelHIDPPButton(button: 6)
+        router.handleHIDPPButton(button: 6, isDown: false)
+        expect(clicks.isEmpty && router.activeGestureSessionCount == 1, "重复取消和迟到 up 不触发调度中心单击")
+        router.cancelHIDPPButton(button: 4)
+        expect(router.activeButtonClaimCount == 0 && activity == [true, false] && clicks.isEmpty,
+               "最后一个会话取消后关闭 motion tap 活动状态，不执行动作")
+    }
+
+    private static func unifyingButtonOwnersKeepOtherHolds() {
+        var owners = LogitechHIDPPButtonOwners()
+        let bluetooth = UUID(), receiver = UUID()
+        expect(owners.update(source: bluetooth, button: 6, isDown: true), "第一个设备按住产生逻辑 down")
+        expect(!owners.update(source: receiver, button: 6, isDown: true), "第二个设备同编号按住不重复发 down")
+        expect(!owners.update(source: receiver, button: 6, isDown: false), "接收器释放不结束仍被蓝牙鼠标持有的同编号按键")
+        expect(!owners.update(source: receiver, button: 6, isDown: false), "设备 teardown 重复释放是幂等的")
+        expect(owners.update(source: bluetooth, button: 6, isDown: false), "最后一个物理持有者释放才产生逻辑 up")
+    }
+
+    private static func unifyingTransportRestoresOffMain() {
+        let sent = Locked<[[UInt8]]>([])
+        weak var target: LogitechUnifyingTransport?
+        let transport = LogitechUnifyingTransport(submitForSelfCheck: { bytes, count, callback, context in
+            let packet = Array(UnsafeBufferPointer(start: bytes, count: count))
+            sent.withValue { $0.append(packet) }
+            let response: [UInt8]
+            if packet[1] == 0xFF {
+                response = unifyingLongReport([0x11, 0xFF, 0x83, 0xB5, packet[4], 0, 8, 0x40, 0x5E, 0, 0, 2])
+            } else if packet[2] == 0 {
+                response = unifyingLongReport([0x11, packet[1], 0, packet[3], 0x17])
+            } else {
+                response = unifyingLongReport(Array(packet.prefix(4)))
+            }
+            target?.receiveForSelfCheck(response)
+            callback(context, kIOReturnSuccess, nil, kIOHIDReportTypeOutput, UInt32(packet[0]), UnsafeMutablePointer(mutating: bytes), count)
+            return kIOReturnSuccess
+        }, onNotification: { _ in }, onStopped: {})
+        target = transport
+        var configured = false
+        var unauthorizedRejected = false
+        transport.start { opened in
+            guard opened else { CFRunLoopStop(CFRunLoopGetMain()); return }
+            _ = transport.send(LogitechUnifyingProtocol.rootControlsRequest(slot: 1)!) { reply in
+                unauthorizedRejected = reply == nil
+                _ = transport.send(LogitechUnifyingProtocol.pairingRequest(slot: 3)!) { _ in
+                    var divert = LogitechUnifyingProtocol.restoreThumbRequest(slot: 3, feature: 0x0B)!
+                    divert[6] = 3
+                    _ = transport.send(divert) { reply in
+                        configured = reply != nil
+                        CFRunLoopStop(CFRunLoopGetMain())
+                    }
+                }
+            }
+        }
+        CFRunLoopRunInMode(.defaultMode, 1, false)
+        expect(configured && unauthorizedRejected, "实际传输队列先拒绝未授权外设，再按配对身份允许 M720 写入")
+        transport.stop()
+        let stopped = transport.waitUntilStopped(deadline: .now() + 3)
+        expect(stopped && transport.isStopped, "主线程不处理回调时，私有 HID 队列仍能完成恢复与关闭")
+        let packets = sent.value
+        expect(packets.allSatisfy { $0[1] != 1 }, "未授权键盘槽位的请求从未提交给 output API")
+        expect(packets.contains { $0[1] == 3 && $0[2] == 0 && $0[4] == 0x1B && $0[5] == 4 },
+               "关闭时重新发现 REPROG_CONTROLS_V4，而不是使用旧 feature index")
+        expect(packets.last?[2] == 0x17 && packets.last?[5] == 0xD0 && packets.last?[6] == 2,
+               "实际恢复写入使用新解析出的索引 0x17，不使用旧的 0x0B")
+    }
+
+    private static func unifyingReceiverRoutesOnlyM720AndReconnects() {
+        MainActor.assumeIsolated {
+            let sent = Locked<[[UInt8]]>([])
+            weak var target: LogitechUnifyingTransport?
+            var buttons: [(Int, Bool)] = []
+            var cancelled: [Int] = []
+            var awaitingCancellation = false
+            let receiver = LogitechUnifyingReceiver(submitForSelfCheck: { bytes, count, callback, context in
+                let packet = Array(UnsafeBufferPointer(start: bytes, count: count))
+                sent.withValue { $0.append(packet) }
+                let response: [UInt8]
+                if packet[1] == 0xFF, packet[2] == 0x81 {
+                    response = [0x10, 0xFF, 0x81, 0, 0x10, 8, 0]
+                } else if packet[1] == 0xFF, packet[2] == 0x80 {
+                    response = [0x10, 0xFF, 0x80, packet[3], 0, 0, 0]
+                } else if packet[1] == 0xFF {
+                    if packet[4] == 0x21 { response = [0x10, 0xFF, 0x8F, 0x83, 0xB5, 8, 0] }
+                    else {
+                        response = unifyingLongReport([0x11, 0xFF, 0x83, 0xB5, packet[4], 0, 8,
+                                                       0x40, 0x5E, 0, 0, packet[4] == 0x20 ? 1 : 2])
+                    }
+                } else if packet[2] == 0 {
+                    response = unifyingLongReport([0x11, packet[1], 0, packet[3], 0x0B])
+                } else if packet[3] >> 4 == 0 {
+                    response = unifyingLongReport([0x11, packet[1], packet[2], packet[3], 2])
+                } else if packet[3] >> 4 == 1 {
+                    response = unifyingLongReport([0x11, packet[1], packet[2], packet[3], 0,
+                                                   packet[4] == 0 ? 0xD0 : 0x56, 0, 0, 0x71, 0, 0, 0, 1])
+                } else {
+                    response = unifyingLongReport(Array(packet.prefix(4)))
+                }
+                target?.receiveForSelfCheck(response)
+                if LogitechUnifyingProtocol.isThumbReportingRequest(packet), packet[6] == 3 {
+                    target?.receiveForSelfCheck(unifyingLongReport([0x11, 1, packet[2], 0, 0, 0xD0]))
+                    target?.receiveForSelfCheck(unifyingLongReport([0x11, packet[1], packet[2], 0, 0, 0xD0]))
+                }
+                callback(context, kIOReturnSuccess, nil, kIOHIDReportTypeOutput, UInt32(packet[0]), UnsafeMutablePointer(mutating: bytes), count)
+                return kIOReturnSuccess
+            }, onButton: { button, down in
+                buttons.append((button, down))
+                if down { CFRunLoopStop(CFRunLoopGetMain()) }
+            }, onCancelButton: { button in
+                cancelled.append(button)
+                if awaitingCancellation { CFRunLoopStop(CFRunLoopGetMain()) }
+            }, onOwnershipChanged: {}, onStopped: { _ in })
+            target = receiver.transport
+            receiver.updateDesiredButtons([4, 5, 6])
+            receiver.start()
+            CFRunLoopRunInMode(.defaultMode, 1, false)
+            expect(buttons.map { $0.0 } == [6] && buttons.map { $0.1 } == [true],
+                   "实际接收器发现流程跳过键盘和空槽位，只把 M720 拇指报告送入按键回调")
+            expect(sent.value.contains { $0[1] == 0xFF && $0[2] == 0x80 && $0[3] == 0 && $0[5] == 9 },
+                   "实际初始化在保留 software-present 位的同时打开无线通知")
+            awaitingCancellation = true
+            target?.receiveForSelfCheck([0x10, 3, 0x41, 4, 1, 0x5E, 0x40])
+            CFRunLoopRunInMode(.defaultMode, 1, false)
+            awaitingCancellation = false
+            expect(cancelled == [6] && receiver.ownedButtons.isEmpty,
+                   "鼠标槽位重新配成键盘时，实际接收器状态机取消会话而不伪造点击")
+            target?.receiveForSelfCheck([0x10, 5, 0x41, 4, 2, 0x5E, 0x40])
+            CFRunLoopRunInMode(.defaultMode, 1, false)
+            expect(buttons.map { $0.0 } == [6, 6] && receiver.ownedButtons == [6],
+                   "M720 重连到槽位 5 后无需重启即可沿用同一拇指绑定")
+            expect(sent.value.filter { $0[1] != 0xFF }.allSatisfy { $0[1] == 3 || $0[1] == 5 },
+                   "实际 output 队列没有向键盘槽位 1 或未知槽位发 HID++ 2.0 控件查询")
+            receiver.stop()
+            expect(receiver.transport.waitUntilStopped(deadline: .now() + 3), "接收器发现／重连链路最终也能在无主队列回调时停止")
+        }
     }
 
     private static func hidppEncodesDPIAndChoosesOtherLevel() {

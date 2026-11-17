@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MouseEngine.shared.stop()
+        // A Unifying restore needs RF acknowledgements. Its private HID queue can drain while
+        // the taps are already stopped; exiting first would leave the thumb diverted in firmware.
+        MouseEngine.shared.flushPendingHIDPPStops()
         // A desktop-switch stroke holds its arrow for 10 ms on a background queue. Exiting in
         // that window would leave the system with a synthetic key-down that never came up.
         ActionRunner.flushPendingGestureSpaceStrokes()

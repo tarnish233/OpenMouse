@@ -73,6 +73,7 @@ final class MouseEngine {
             onButton: { button, isDown in
                 router.handleHIDPPButton(button: button, isDown: isDown)
             },
+            onButtonCancelled: { button in router.cancelHIDPPButton(button: button) },
             onOwnedButtonsChanged: { buttons in
                 router.updateHIDPPOwnedButtons(buttons)
             }
@@ -150,6 +151,10 @@ final class MouseEngine {
         isComparingScroll = false
         teardownRuntime()
         status = .off
+    }
+
+    func flushPendingHIDPPStops() {
+        hidpp?.flushPendingReceiverStops()
     }
 
     /// Reconcile the tap with the current stored preferences.
@@ -302,6 +307,7 @@ final class MouseEngine {
                 self?.capturedPress = CapturedPress(button: button, modifiers: modifiers)
             }
         }
+        hidpp?.prepareButtonCapture()
         apply()
     }
 

@@ -16,7 +16,7 @@ make debug    # 独立测试包 → build/Open Mouse Debug.app
 make debug-run # 构建并启动测试包；日常硬件/UI 测试必须用它，不能启动正式名称的包
 make run      # 构建并启动正式名称的本地包，仅用于明确的发布前验证
 make install  # 拷到 /Applications 并启动（登录项注册必须装在这里才生效）
-make test     # 应用自检 571 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
+make test     # 应用自检 688 项 + 更新助手自检 + 正式/社区发布签名及构建元数据检查，必须全过
 CODESIGN_IDENTITY=<Developer ID 证书 SHA-1> make dist  # 严格发布签名、校验后打 zip + sha256
 make clean
 make tcc-reset  # 忘掉辅助功能授权，换过签名身份或授权变成幽灵项时用
@@ -256,21 +256,25 @@ AppDelegate ──▶ PointerSpeedController   逐设备写 HID 加速属性（�
 
 **厂商 ID `0x046D` 是第一道过滤，非 Logitech 鼠标完全不适用。** HID++ 是 Logitech 私有协议，DPI 走 feature `0x2201 ADJUSTABLE_DPI`；别的品牌没有这套东西，这不是没做而是做不到。
 
-三条实现范围限制，写清楚是因为它们在界面上**完全看不出来**：
+**M720 的隐藏拇指键是物理 CID `0x00D0`，不是虚拟 `0x00D7`。** 通过 `LogitechHIDPPProtocol.m720ThumbButton` 使用独立持久化编号 `6`，不能复用 Forward 的 `4` 或 DPI 的 `5`。录入期间临时接管，退出录入且无生效绑定时释放；只选择真实上报且可接管的控件，不依赖 DPI 功能。解除所有权时主动释放不再拥有的 held/claim，不能等已切回原生通道的 HID++ up；其他会话不能一起中断。接入范围是蓝牙直连，以及标准 Unifying 上的 M720 拇指键，**本项目没有 M720 实机验证**。来源、测试与回测见 `docs/m720-thumb-button.md` 和 `docs/m720-unifying.md`。
 
-1. **只支持蓝牙直连。** `LogitechHIDPPManager.attach()` 要求 transport 含 `bluetooth` 且 primary usage 为 `0x0001`/`0x0002`。Bolt / Unifying 接收器在 IOKit 里 transport 是 `USB`，直接被挡；就算放行，device index 也写死了 `0xFF`（直连寻址），接收器需要 1–6。USB 有线的 HID++ 端点 usage 是 `0xFF43`/`0x0202`，同样过不了。**这个 `return` 之前没有任何日志**，所以「插了 Bolt 接收器」和「压根没接鼠标」在日志里长得一模一样。
-2. **DPI 档位按 M750 硬编码** 400–4000 / 100 步进（`LogitechDPILevels.swift`），从不调 `getSensorDPIList`。MX Master 3S 的 4000–8000 段和 50 步进拿不到。
-3. **`0x1B04 REPROG_CONTROLS_V4` 是 DPI 的硬前置。** 不支持它的鼠标 `stage = .failed`，DPI 一并失效——这是实现耦合，不是设备的锅。
+三条实现范围限制：
 
-**`.failed` 是终态，除了蓝牙重连或重启 App 没有任何重试。** 蓝牙鼠标在 App 启动那一刻恰好省电休眠，discovery 1.5s 超时后 DPI 键就永久失效。
+1. **蓝牙与接收器是两条接口路径，不能仅放开 USB 过滤。** `LogitechHIDPPDevicePolicy` 仍仅打开蓝牙的 `0x0001/0x0002` 鼠标接口。`LogitechUnifyingDiscovery` 通过 IORegistry 查 `C52B / C532` 的 `0xFF00/1` 与 `/2` vendor 集合，普通键盘／鼠标接口不打开。先读配对寄存器或连接通知确认 type=mouse、WPID=`405E`，再为选定 M720 建立槽位 `1...6` 的会话。接收器自身才用 `0xFF`，蓝牙也仍用 `0xFF`。当前接收器只接管一个 M720 的拇指键；Bolt / Nano / Lightspeed、USB 有线及其他接收器鼠标不在范围内。
+2. **DPI 仍只走 M750 蓝牙路径，档位按 M750 硬编码** 400–4000 / 100 步进（`LogitechDPILevels.swift`），从不调 `getSensorDPIList`。MX Master 3S 的 4000–8000 段和 50 步进拿不到。
+3. **`0x1B04 REPROG_CONTROLS_V4` 是 DPI 的硬前置。** 不支持它的蓝牙鼠标 `stage = .failed`，DPI 一并失效——这是实现耦合，不是设备的锅。
 
-链路挂掉时 **UI 零反馈**：「没找到设备」「不支持」「没给输入监控权限」「超时」四种情况在界面上完全一样——两个档位照常可点，只是不高亮、不显示「当前 XXXX DPI」。诊断只能看日志，category 是 `hidpp`：
+**Unifying 物理传输必须串行，IO 与恢复回调都在私有 dispatch queue。** 一次一条命令，按槽位／函数／软件 ID 匹配；不能让接收器或键盘的回复推动鼠标会话。报告类型 `0x10` 为 7 字节、`0x11` 为 20 字节，HID++ 1.0 / 2.0 错误码都在完整帧 `[5]`。恢复义务由传输层保留并带世代，不能在逻辑会话失败时丢失，也不能用旧 feature index 恢复；旧实例的 cancellation handler 完成前禁止重开同一 registry ID。退出在 tap 停止后有限 flush，不能依赖被阻塞的主线程回调。取消／断连不是物理点击 up；跨设备同编号的 held 状态由 `LogitechHIDPPButtonOwners` 聚合。
+
+**蓝牙 `.failed` 仍是终态，除了重连或重启 App 没有重试。** Unifying M720 则有有限的 0.4 / 1.2 / 3 秒重试窗口，且每次重试重新核对槽位身份；重连、唤醒与重新录入可以开新窗口，不持续轮询。IOHID dispatch queue 注册必须在 activate 前，device / input buffer 保留到 cancellation handler 完成；不得与 run loop 混用。
+
+链路失败目前仍主要靠诊断日志，特别是 M750 的 DPI 失败没有独立 UI 状态：
 
 ```bash
 /usr/bin/log stream --predicate 'subsystem == "com.openmouse.OpenMouse" && category == "hidpp"'
 ```
 
-只有 `manager started` 而没有 `device connected` 就是第 1 条的过滤没过。自检那组**只覆盖纯编解码，IOKit 侧零覆盖**——全绿完全不能说明某只鼠标能用。
+蓝牙看 `device connected`；接收器还看 `Unifying vendor interface`、`M720 identified slot=... wpid=0x405e`、请求超时与恢复 ACK。自检覆盖协议、模拟 IO 驱动下的真实传输队列／接收器状态机和路由，**真实 IOKit / RF 链路零覆盖**——全绿完全不能说明某只鼠标能用。
 
 ## 约定
 

@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import IOKit
@@ -9,16 +10,18 @@ import os
 enum LogitechHIDPPProtocol {
     static let adjustableDPIFeature: UInt16 = 0x2201
 
-    /// `CGEvent` numbers used for controls that only arrive through HID++. Keep these in the
-    /// normal extra-button range so the existing binding model can treat them exactly like a
-    /// generic sixth mouse button.
+    /// Logical button numbers are persisted in the existing binding model. Keep the DPI
+    /// assignment stable and give M720's physical thumb control its own extra-button number:
+    /// aliasing Forward (4) would make the two physical buttons share one shortcut.
     static let dpiSwitchButton = 5
+    static let m720ThumbButton = 6
 
     static let cidToButton: [UInt16: Int] = [
         0x0052: 2, // middle
         0x0053: 3, // back
         0x0056: 4, // forward
         0x00C3: 4, // Logitech Gesture
+        0x00D0: m720ThumbButton, // M720 physical thumb; not the virtual 0x00D7 control
         0x00D7: 4, // Logitech Virtual Gesture
         0x00FD: dpiSwitchButton // DPI Switch
     ]
@@ -26,11 +29,37 @@ enum LogitechHIDPPProtocol {
     /// Controls that do not emit a usable native `CGEvent` before they have been diverted. They
     /// must be owned temporarily while the recorder is open, otherwise there is no first press
     /// from which a user can create a binding.
-    static let captureOnlyButtons: Set<Int> = [dpiSwitchButton]
+    static let captureOnlyButtons: Set<Int> = [dpiSwitchButton, m720ThumbButton]
+
+    struct Control {
+        let cid: UInt16
+        let divertable: Bool
+    }
+
+    struct ButtonState {
+        private(set) var held: Set<Int> = []
+
+        mutating func update(_ now: Set<Int>) -> (pressed: Set<Int>, released: Set<Int>) {
+            let pressed = now.subtracting(held)
+            let released = held.subtracting(now)
+            held = now
+            return (pressed, released)
+        }
+    }
 
     static func desiredButtons(configured: Set<Int>, capturing: Bool) -> Set<Int> {
         guard capturing else { return configured }
         return configured.union(captureOnlyButtons)
+    }
+
+    /// Recording may request controls absent from this model. Only touch controls the device
+    /// actually advertised as divertable; M720's thumb capture does not depend on a DPI feature.
+    static func desiredCIDs(controls: [Control], buttons: Set<Int>) -> Set<UInt16> {
+        Set(controls.compactMap { control in
+            guard control.divertable, let button = cidToButton[control.cid],
+                  buttons.contains(button) else { return nil }
+            return control.cid
+        })
     }
 
     static func reportingParameters(cid: UInt16, divert: Bool) -> [UInt8] {
@@ -106,19 +135,33 @@ final class LogitechHIDPPManager {
     private static let log = Logger(subsystem: "com.openmouse.OpenMouse", category: "hidpp")
 
     private let onButton: ButtonHandler
+    private let onButtonCancelled: (Int) -> Void
     private let onOwnedButtonsChanged: (Set<Int>) -> Void
+    private var buttonOwners = LogitechHIDPPButtonOwners()
     private var onDPIChanged: DPIHandler?
     private var currentDPI: Int?
     private var manager: IOHIDManager?
     private var sessions: [IOHIDDevice: LogitechHIDPPDeviceSession] = [:]
+    private var receivers: [UInt64: LogitechUnifyingReceiver] = [:]
+    private var retiringReceivers: [UInt64: (id: UUID, transport: LogitechUnifyingTransport)] = [:]
+    private var deferredReceivers: [UInt64: IOHIDDevice] = [:]
+    private var wakeObserver: NSObjectProtocol?
     private var desiredButtons: Set<Int> = []
     private(set) var isRunning = false
+    private lazy var receiverDiscovery = LogitechUnifyingDiscovery(onMatched: { [weak self] id, device in
+        self?.attachReceiver(id: id, device: device)
+    }, onRemoved: { [weak self] id in
+        self?.deferredReceivers.removeValue(forKey: id)
+        self?.retireReceiver(id: id, restoreControls: false)
+    })
 
     init(
         onButton: @escaping ButtonHandler,
+        onButtonCancelled: ((Int) -> Void)? = nil,
         onOwnedButtonsChanged: @escaping (Set<Int>) -> Void
     ) {
         self.onButton = onButton
+        self.onButtonCancelled = onButtonCancelled ?? { onButton($0, false) }
         self.onOwnedButtonsChanged = onOwnedButtonsChanged
     }
 
@@ -155,10 +198,25 @@ final class LogitechHIDPPManager {
         }
         isRunning = true
         Self.log.notice("manager started")
+        receiverDiscovery.start()
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isRunning else { return }
+                self.receiverDiscovery.rescan()
+                for receiver in self.receivers.values { receiver.rescan() }
+            }
+        }
     }
 
     func stop() {
         guard isRunning || manager != nil else { return }
+        receiverDiscovery.stop()
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
+        deferredReceivers.removeAll()
+        for id in Array(receivers.keys) { retireReceiver(id: id, restoreControls: true) }
         for session in sessions.values { session.stop() }
         sessions.removeAll()
         publishOwnedButtons()
@@ -179,6 +237,24 @@ final class LogitechHIDPPManager {
     func updateDesiredButtons(_ buttons: Set<Int>) {
         desiredButtons = buttons
         for session in sessions.values { session.updateDesiredButtons(buttons) }
+        for receiver in receivers.values { receiver.updateDesiredButtons(buttons) }
+    }
+
+    func prepareButtonCapture() {
+        guard isRunning else { return }
+        receiverDiscovery.rescan()
+        for receiver in receivers.values { receiver.prepareForCapture() }
+    }
+
+    /// Called only after the event taps have stopped, at process exit. Receiver IO and its
+    /// restoration callbacks live off-main, so this bounded wait cannot starve their replies.
+    func flushPendingReceiverStops() {
+        let deadline = DispatchTime.now() + LogitechUnifyingProtocol.exitFlushTimeout
+        for item in retiringReceivers.values {
+            if !item.transport.waitUntilStopped(deadline: deadline) {
+                Self.log.error("Unifying vendor interface did not finish stopping before exit")
+            }
+        }
     }
 
     func setDPIHandler(_ handler: DPIHandler?) {
@@ -234,11 +310,13 @@ final class LogitechHIDPPManager {
             transport: transport
         ) else { return }
 
+        let source = UUID()
         let session = LogitechHIDPPDeviceSession(
             device: device,
             name: name.isEmpty ? "Logitech mouse" : name,
             productID: propertyInt(device, kIOHIDProductIDKey),
-            onButton: onButton,
+            onButton: { [weak self] button, down in self?.handleButton(source: source, button: button, isDown: down) },
+            onCancelButton: { [weak self] button in self?.cancelButton(source: source, button: button) },
             onOwnershipChanged: { [weak self] in self?.publishOwnedButtons() },
             onDPIChanged: { [weak self] dpi in self?.publishDPI(dpi) }
         )
@@ -249,9 +327,58 @@ final class LogitechHIDPPManager {
 
     private func detach(_ device: IOHIDDevice) {
         guard let session = sessions.removeValue(forKey: device) else { return }
-        session.stop()
+        session.stop(cancelHeld: true)
         publishOwnedButtons()
         if sessions.isEmpty { publishDPI(nil) }
+    }
+
+    private func attachReceiver(id: UInt64, device: IOHIDDevice) {
+        guard isRunning, receivers[id] == nil else { return }
+        // Do not open the same physical interface until the old instance has restored its
+        // control and completed HID cancellation. Otherwise its late clear can undo re-enable.
+        if let old = retiringReceivers[id], !old.transport.isStopped {
+            deferredReceivers[id] = device
+            return
+        }
+        retiringReceivers.removeValue(forKey: id)
+        let source = UUID()
+        let receiver = LogitechUnifyingReceiver(
+            device: device,
+            onButton: { [weak self] button, down in self?.handleButton(source: source, button: button, isDown: down) },
+            onCancelButton: { [weak self] button in self?.cancelButton(source: source, button: button) },
+            onOwnershipChanged: { [weak self] in self?.publishOwnedButtons() },
+            onStopped: { [weak self] token in self?.receiverStopped(id: id, token: token) }
+        )
+        receivers[id] = receiver
+        receiver.updateDesiredButtons(desiredButtons)
+        Self.log.notice("Unifying vendor interface discovered registryID=\(id)")
+        receiver.start()
+    }
+
+    private func retireReceiver(id: UInt64, restoreControls: Bool) {
+        guard let receiver = receivers.removeValue(forKey: id) else { return }
+        retiringReceivers[id] = (receiver.id, receiver.transport)
+        receiver.stop(restoreControls: restoreControls)
+        publishOwnedButtons()
+    }
+
+    private func receiverStopped(id: UInt64, token: UUID) {
+        if receivers[id]?.id == token {
+            receivers.removeValue(forKey: id)?.stop(restoreControls: false)
+            publishOwnedButtons()
+        }
+        if retiringReceivers[id]?.id == token { retiringReceivers.removeValue(forKey: id) }
+        if isRunning, let device = deferredReceivers.removeValue(forKey: id), receiverDiscovery.presentIDs.contains(id) {
+            attachReceiver(id: id, device: device)
+        }
+    }
+
+    private func handleButton(source: UUID, button: Int, isDown: Bool) {
+        if buttonOwners.update(source: source, button: button, isDown: isDown) { onButton(button, isDown) }
+    }
+
+    private func cancelButton(source: UUID, button: Int) {
+        if buttonOwners.update(source: source, button: button, isDown: false) { onButtonCancelled(button) }
     }
 
     private func publishDPI(_ dpi: Int?) {
@@ -261,9 +388,10 @@ final class LogitechHIDPPManager {
     }
 
     private func publishOwnedButtons() {
-        let buttons = sessions.values.reduce(into: Set<Int>()) { result, session in
+        var buttons = sessions.values.reduce(into: Set<Int>()) { result, session in
             result.formUnion(session.ownedButtons)
         }
+        for receiver in receivers.values { buttons.formUnion(receiver.ownedButtons) }
         onOwnedButtonsChanged(buttons)
     }
 
@@ -277,12 +405,7 @@ final class LogitechHIDPPManager {
 }
 
 @MainActor
-private final class LogitechHIDPPDeviceSession {
-    private struct Control {
-        let cid: UInt16
-        let divertable: Bool
-    }
-
+final class LogitechHIDPPDeviceSession {
     private enum ProtocolStage: Equatable {
         case idle
         case feature
@@ -301,14 +424,18 @@ private final class LogitechHIDPPDeviceSession {
 
     private static let log = Logger(subsystem: "com.openmouse.OpenMouse", category: "hidpp")
     private static let longReportID: UInt8 = 0x11
-    private static let deviceIndex: UInt8 = 0xFF
     private static let reprogControlsV4: UInt16 = 0x1B04
     private static let reportSize = 20
 
-    private let device: IOHIDDevice
+    private let device: IOHIDDevice?
+    private let deviceIndex: UInt8
+    private let externalSend: (([UInt8]) -> Bool)?
+    private let allowedButtons: Set<Int>?
+    private let supportsDPI: Bool
     private let name: String
     private let productID: Int
     private let onButton: LogitechHIDPPManager.ButtonHandler
+    private let onCancelButton: ((Int) -> Void)?
     private let onOwnershipChanged: () -> Void
     private let onDPIChanged: (Int) -> Void
     private var reportBuffer: UnsafeMutablePointer<UInt8>?
@@ -316,10 +443,10 @@ private final class LogitechHIDPPDeviceSession {
     private var stopped = false
     private var stage: ProtocolStage = .idle
     private var reprogFeatureIndex: UInt8?
-    private var controls: [Control] = []
+    private var controls: [LogitechHIDPPProtocol.Control] = []
     private var desiredButtons: Set<Int> = []
     private var divertedCIDs: Set<UInt16> = []
-    private var activeButtons: Set<Int> = []
+    private var buttonState = LogitechHIDPPProtocol.ButtonState()
     private var timeout: DispatchWorkItem?
     private var dpiFeatureIndex: UInt8?
     private var dpiLevels: LogitechDPILevels?
@@ -332,18 +459,42 @@ private final class LogitechHIDPPDeviceSession {
         Set(divertedCIDs.compactMap { LogitechHIDPPProtocol.cidToButton[$0] })
     }
 
+    var needsRecovery: Bool { stage == .failed }
+
+    /// Capture these before stopping a borrowed receiver session. Its shared transport owns
+    /// the asynchronous restore/close sequence, not this peripheral's protocol state.
+    var restorationReports: [[UInt8]] {
+        guard let feature = reprogFeatureIndex else { return [] }
+        return divertedCIDs.sorted().map { cid in
+            report(featureIndex: feature, function: 3,
+                   params: LogitechHIDPPProtocol.reportingParameters(cid: cid, divert: false))
+        }
+    }
+
     init(
-        device: IOHIDDevice,
+        device: IOHIDDevice? = nil,
         name: String,
         productID: Int,
+        deviceIndex: UInt8 = 0xFF,
+        allowedButtons: Set<Int>? = nil,
+        supportsDPI: Bool = true,
+        sendReport: (([UInt8]) -> Bool)? = nil,
         onButton: @escaping LogitechHIDPPManager.ButtonHandler,
+        onCancelButton: ((Int) -> Void)? = nil,
         onOwnershipChanged: @escaping () -> Void,
         onDPIChanged: @escaping (Int) -> Void
     ) {
+        precondition(device != nil || sendReport != nil)
+        precondition(deviceIndex == 0xFF || LogitechUnifyingProtocol.slots.contains(deviceIndex))
         self.device = device
+        self.deviceIndex = deviceIndex
+        self.allowedButtons = allowedButtons
+        self.supportsDPI = supportsDPI
+        externalSend = sendReport
         self.name = name
         self.productID = productID
         self.onButton = onButton
+        self.onCancelButton = onCancelButton
         self.onOwnershipChanged = onOwnershipChanged
         self.onDPIChanged = onDPIChanged
     }
@@ -356,40 +507,37 @@ private final class LogitechHIDPPDeviceSession {
 
     func start() {
         guard stage == .idle else { return }
-        let result = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
-        opened = result == kIOReturnSuccess
-        guard opened else {
-            stage = .failed
-            Self.log.error("\(self.name, privacy: .public) open failed result=0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)")
-            return
+        if let device {
+            let result = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
+            opened = result == kIOReturnSuccess
+            guard opened else {
+                stage = .failed
+                Self.log.error("\(self.name, privacy: .public) open failed result=0x\(String(UInt32(bitPattern: result), radix: 16), privacy: .public)")
+                return
+            }
+
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
+            buffer.initialize(repeating: 0, count: 64)
+            reportBuffer = buffer
+            IOHIDDeviceRegisterInputReportCallback(
+                device, buffer, 64, Self.inputReport,
+                Unmanaged.passUnretained(self).toOpaque()
+            )
+            // BLE owns its interface. A receiver peripheral borrows one shared transport and
+            // must never open/close or replace its sibling slots' input-report callback.
+            IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         }
 
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
-        buffer.initialize(repeating: 0, count: 64)
-        reportBuffer = buffer
-        IOHIDDeviceRegisterInputReportCallback(
-            device,
-            buffer,
-            64,
-            Self.inputReport,
-            Unmanaged.passUnretained(self).toOpaque()
-        )
-
-        // The discovery manager deliberately does not schedule/open its devices. Each
-        // accepted session owns its report delivery, including hot-plugged mice.
-        IOHIDDeviceScheduleWithRunLoop(
-            device,
-            CFRunLoopGetMain(),
-            CFRunLoopMode.commonModes.rawValue
-        )
-
-        Self.log.notice("device connected name=\(self.name, privacy: .public) pid=0x\(String(self.productID, radix: 16), privacy: .public)")
+        Self.log.notice("device connected name=\(self.name, privacy: .public) pid=0x\(String(self.productID, radix: 16), privacy: .public) slot=\(self.deviceIndex)")
         stage = .feature
         armTimeout(label: "feature discovery")
-        _ = send(featureIndex: 0x00, function: 0, params: [0x1B, 0x04])
+        if !send(featureIndex: 0x00, function: 0, params: [0x1B, 0x04]) {
+            timeout?.cancel()
+            stage = .failed
+        }
     }
 
-    func stop() {
+    func stop(restoreControls: Bool = true, cancelHeld: Bool = false) {
         guard !stopped else { return }
         stopped = true
         timeout?.cancel()
@@ -400,15 +548,16 @@ private final class LogitechHIDPPDeviceSession {
         dpiLevels = nil
         dpiRequestID = nil
         dpiRefreshCache = LogitechDPIRefreshCache()
-        releaseAllButtons()
-        if let feature = reprogFeatureIndex {
+        if cancelHeld { cancelAllButtons() }
+        else { releaseAllButtons() }
+        if restoreControls, let feature = reprogFeatureIndex {
             for cid in divertedCIDs.sorted() {
                 _ = setReporting(featureIndex: feature, cid: cid, divert: false)
             }
         }
         divertedCIDs.removeAll()
         onOwnershipChanged()
-        if opened {
+        if opened, let device {
             IOHIDDeviceUnscheduleFromRunLoop(
                 device,
                 CFRunLoopGetMain(),
@@ -424,17 +573,21 @@ private final class LogitechHIDPPDeviceSession {
     }
 
     func updateDesiredButtons(_ buttons: Set<Int>) {
-        desiredButtons = buttons
+        desiredButtons = allowedButtons.map { buttons.intersection($0) } ?? buttons
         if stage == .ready { applyDesiredDiverts() }
     }
 
     func refreshDPI() {
-        guard stage == .ready, dpiStage == .idle,
+        guard supportsDPI, stage == .ready, dpiStage == .idle,
               dpiRefreshCache.needsRefresh(at: ProcessInfo.processInfo.systemUptime) else { return }
         beginDPIRequest(levels: nil)
     }
 
     func toggleDPI(_ levels: LogitechDPILevels) {
+        guard supportsDPI else {
+            Self.log.error("\(self.name, privacy: .public) receiver path only supports the M720 thumb control, not DPI")
+            return
+        }
         guard stage == .ready else {
             Self.log.error("\(self.name, privacy: .public) DPI toggle unavailable before HID++ discovery is ready")
             return
@@ -480,7 +633,7 @@ private final class LogitechHIDPPDeviceSession {
 
     private static let inputReport: IOHIDReportCallback = {
         context, _, _, _, reportID, report, reportLength in
-        guard let context else { return }
+        guard let context, reportLength >= 0, reportLength <= 64 else { return }
         let session = Unmanaged<LogitechHIDPPDeviceSession>
             .fromOpaque(context)
             .takeUnretainedValue()
@@ -490,26 +643,22 @@ private final class LogitechHIDPPDeviceSession {
         MainActor.assumeIsolated { session.receive(bytes) }
     }
 
-    private func receive(_ report: [UInt8]) {
-        guard !stopped, report.count >= 7,
-              report[0] == 0x10 || report[0] == Self.longReportID,
-              report[1] == Self.deviceIndex else { return }
+    func receive(_ report: [UInt8]) {
+        guard !stopped, LogitechUnifyingProtocol.isValidReport(report),
+              report[1] == deviceIndex else { return }
 
         let feature = report[2]
         let function = report[3] >> 4
         let softwareID = report[3] & 0x0F
 
-        if feature == 0xFF {
+        if let error = LogitechUnifyingProtocol.errorCode(in: report) {
             if dpiStage != .idle {
-                let error = report.count > 6 ? report[6] : 0
                 finishDPIRequest(error: "HID++ error code=0x\(String(error, radix: 16))")
                 return
             }
             timeout?.cancel()
             stage = .failed
-            let originalFeature = report.count > 3 ? report[3] : 0
-            let error = report.count > 6 ? report[6] : 0
-            Self.log.error("\(self.name, privacy: .public) HID++ error feature=0x\(String(originalFeature, radix: 16), privacy: .public) code=0x\(String(error, radix: 16), privacy: .public)")
+            Self.log.error("\(self.name, privacy: .public) HID++ error feature=0x\(String(report[3], radix: 16), privacy: .public) code=0x\(String(error, radix: 16), privacy: .public)")
             return
         }
 
@@ -562,7 +711,7 @@ private final class LogitechHIDPPDeviceSession {
             let flagsHigh = report.count > 12 ? UInt16(report[12]) << 8 : 0
             let flags = flagsLow | flagsHigh
             let divertable = flags & 0x20 != 0
-            controls.append(Control(cid: cid, divertable: divertable))
+            controls.append(.init(cid: cid, divertable: divertable))
             let button = LogitechHIDPPProtocol.cidToButton[cid]
             Self.log.notice("\(self.name, privacy: .public) control cid=0x\(String(cid, radix: 16), privacy: .public) button=\(button ?? -1) divertable=\(divertable)")
             let next = index + 1
@@ -591,12 +740,10 @@ private final class LogitechHIDPPDeviceSession {
 
     private func applyDesiredDiverts() {
         guard stage == .ready, let feature = reprogFeatureIndex else { return }
-        let desiredCIDs = Set(controls.compactMap { control -> UInt16? in
-            guard control.divertable,
-                  let button = LogitechHIDPPProtocol.cidToButton[control.cid],
-                  desiredButtons.contains(button) else { return nil }
-            return control.cid
-        })
+        let desiredCIDs = LogitechHIDPPProtocol.desiredCIDs(
+            controls: controls,
+            buttons: desiredButtons
+        )
 
         let toRelease = divertedCIDs.subtracting(desiredCIDs)
         for cid in toRelease.sorted() {
@@ -609,6 +756,10 @@ private final class LogitechHIDPPDeviceSession {
                 divertedCIDs.insert(cid)
             }
         }
+        // Closing the recorder or removing a binding can restore native reporting before the
+        // physical up. No HID++ release may follow, so retire only claims we no longer own now;
+        // leaving the old hold cached would also hide the next first press after re-capture.
+        publishButtonState(buttonState.held.intersection(ownedButtons))
         onOwnershipChanged()
     }
 
@@ -723,6 +874,7 @@ private final class LogitechHIDPPDeviceSession {
     /// hold that frame (and the event tap) on every visit. Do not add a synchronous fallback.
     @discardableResult
     private func sendDPIReport(featureIndex: UInt8, function: UInt8, params: [UInt8] = []) -> Bool {
+        guard let device else { return false }
         let requestID = dpiRequestID
         let expectedStage = dpiStage
         let result = HIDAsyncReport.send(
@@ -750,7 +902,7 @@ private final class LogitechHIDPPDeviceSession {
     private func report(featureIndex: UInt8, function: UInt8, params: [UInt8]) -> [UInt8] {
         var report = [UInt8](repeating: 0, count: Self.reportSize)
         report[0] = Self.longReportID
-        report[1] = Self.deviceIndex
+        report[1] = deviceIndex
         report[2] = featureIndex
         report[3] = (function << 4) | 0x01
         for (offset, value) in params.prefix(16).enumerated() { report[4 + offset] = value }
@@ -760,6 +912,8 @@ private final class LogitechHIDPPDeviceSession {
     @discardableResult
     private func send(featureIndex: UInt8, function: UInt8, params: [UInt8] = []) -> Bool {
         let bytes = report(featureIndex: featureIndex, function: function, params: params)
+        if let externalSend { return externalSend(bytes) }
+        guard let device else { return false }
         let result = IOHIDDeviceSetReport(
             device, kIOHIDReportTypeOutput, CFIndex(Self.longReportID), bytes, bytes.count
         )
@@ -767,28 +921,38 @@ private final class LogitechHIDPPDeviceSession {
     }
 
     private func handleDivertedButtons(_ report: [UInt8]) {
-        let now = LogitechHIDPPProtocol.activeButtons(
+        publishButtonState(LogitechHIDPPProtocol.activeButtons(
             in: report,
             ownedCIDs: divertedCIDs
-        )
-        let pressed = now.subtracting(activeButtons)
-        let released = activeButtons.subtracting(now)
-        activeButtons = now
-        if !pressed.isEmpty || !released.isEmpty {
+        ))
+    }
+
+    private func publishButtonState(_ now: Set<Int>) {
+        let changes = buttonState.update(now)
+        if !changes.pressed.isEmpty || !changes.released.isEmpty {
             Self.log.notice("\(self.name, privacy: .public) activeButtons=\(now.sorted(), privacy: .public)")
         }
-        for button in pressed.sorted() { onButton(button, true) }
-        for button in released.sorted() { onButton(button, false) }
+        for button in changes.pressed.sorted() { onButton(button, true) }
+        for button in changes.released.sorted() { onButton(button, false) }
     }
 
     private func releaseAllButtons() {
-        let held = activeButtons
-        activeButtons.removeAll()
-        for button in held.sorted() { onButton(button, false) }
+        publishButtonState([])
+    }
+
+    private func cancelAllButtons() {
+        let released = buttonState.update([]).released
+        for button in released.sorted() {
+            if let onCancelButton { onCancelButton(button) }
+            else { onButton(button, false) }
+        }
     }
 
     private func armTimeout(label: String) {
         timeout?.cancel()
+        // A receiver request may wait behind another slot/receiver-register command. Its
+        // physical transport owns the timeout from actual transmission, not enqueue time.
+        guard externalSend == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.stage != .ready, !self.stopped else { return }
             self.stage = .failed

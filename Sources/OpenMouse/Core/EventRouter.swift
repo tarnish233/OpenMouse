@@ -128,6 +128,15 @@ final class EventRouter {
         )
     }
 
+    /// A receiver going offline/re-pairing is cancellation, not a physical click release.
+    /// Retire only this logical key; other buttons' gestures and the scroll animation survive.
+    func cancelHIDPPButton(button: Int) {
+        buttonClaims.removeValue(forKey: button)
+        guard let session = gestureSessions.removeValue(forKey: button) else { return }
+        if session.delivery == .interactive { gestureOutput.end(button: button, cancelled: true) }
+        if gestureSessions.isEmpty { onGestureActivityChanged?(false) }
+    }
+
     /// Frame source in use for the current or most recent glide.
     var frameSource: DisplayLinkTicker.Source { animator.frameSource }
 
